@@ -1,0 +1,6 @@
+employee_id,name,department,hours_worked
+1001,Aoki,Care,8
+1002,Sato,Office,7.5
+1003,Tanaka,,8
+1002,Sato,Office,7.5
+1004,Suzuki,Care,

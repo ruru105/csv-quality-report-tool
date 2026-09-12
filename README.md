@@ -1,8 +1,8 @@
 # CSV Quality Report Tool
 
-CSVファイルを自動検査し、データ品質の確認結果を見やすいExcelレポートとして出力するPythonツールです。
+[![Python tests](https://github.com/ruru105/csv-quality-report-tool/actions/workflows/main.yml/badge.svg)](https://github.com/ruru105/csv-quality-report-tool/actions/workflows/main.yml)
 
-手作業によるCSV確認の負担を減らし、欠損データや重複データの見落としを防ぐことを目的として作成しました。
+CSVファイルを自動検査し、データ品質の確認結果を見やすいExcelレポートとして出力するPythonツールです。
 
 ## 主な機能
 

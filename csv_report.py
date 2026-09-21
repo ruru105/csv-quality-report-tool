@@ -1,11 +1,33 @@
+import argparse
+import sys
 from pathlib import Path
 
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 
 
-INPUT_FILE = Path("sample.csv")
-OUTPUT_FILE = Path("report.xlsx")
+DEFAULT_INPUT_FILE = "sample.csv"
+DEFAULT_OUTPUT_FILE = "report.xlsx"
+
+
+def parse_args(argv):
+    """コマンドで指定された、検査するCSVと出力先を読み取る。"""
+    parser = argparse.ArgumentParser(
+        description="CSVファイルを検査して、結果をExcelレポートにまとめます。"
+    )
+    parser.add_argument(
+        "input_file",
+        nargs="?",
+        default=DEFAULT_INPUT_FILE,
+        help=f"検査するCSVファイル(省略すると {DEFAULT_INPUT_FILE})",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=DEFAULT_OUTPUT_FILE,
+        help=f"作成するExcelファイル(省略すると {DEFAULT_OUTPUT_FILE})",
+    )
+    return parser.parse_args(argv)
 
 
 def read_csv_safely(file_path):
@@ -44,12 +66,17 @@ def format_workbook(writer):
             )
 
 
-def main():
-    if not INPUT_FILE.exists():
-        print(f"エラー：{INPUT_FILE} が見つかりません。")
+def main(argv=None):
+    # argv を渡さない(テストなど)ときは、指定なしとして動く。
+    args = parse_args([] if argv is None else argv)
+    input_file = Path(args.input_file)
+    output_file = Path(args.output)
+
+    if not input_file.exists():
+        print(f"エラー：{input_file} が見つかりません。")
         return
 
-    data = read_csv_safely(INPUT_FILE)
+    data = read_csv_safely(input_file)
 
     row_count = len(data)
     column_count = len(data.columns)
@@ -94,7 +121,7 @@ def main():
     missing_rows = data[data.isna().any(axis=1)]
     duplicate_rows = data[data.duplicated(keep=False)]
 
-    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
+    with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         summary.to_excel(writer, sheet_name="検査結果", index=False)
         column_info.to_excel(writer, sheet_name="列情報", index=False)
         missing_rows.to_excel(writer, sheet_name="欠損行", index=False)
@@ -103,7 +130,7 @@ def main():
 
         format_workbook(writer)
 
-    print(f"完了：{OUTPUT_FILE} を作成しました。")
+    print(f"完了：{output_file} を作成しました。")
     print(
         f"データ件数={row_count} / "
         f"欠損セル数={missing_count} / "
@@ -113,4 +140,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

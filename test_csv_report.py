@@ -65,3 +65,36 @@ def test_report_generation(tmp_path, monkeypatch):
     assert sheet["B4"].value == 2
     assert sheet["B5"].value == 1
     assert sheet["B6"].value == "問題あり"
+
+
+def test_report_with_specified_files(tmp_path):
+    # sample.csv ではない名前のCSVを、コマンドで指定して検査できること。
+    csv_file = tmp_path / "my_data.csv"
+    csv_file.write_text(
+        "id,name\n1,Aoki\n2,\n2,\n",
+        encoding="utf-8-sig",
+    )
+    output_file = tmp_path / "my_report.xlsx"
+
+    main([str(csv_file), "-o", str(output_file)])
+
+    assert output_file.exists()
+
+    sheet = load_workbook(output_file, data_only=True)["検査結果"]
+
+    assert sheet["B2"].value == 3
+    assert sheet["B3"].value == 2
+    assert sheet["B4"].value == 2
+    assert sheet["B5"].value == 1
+    assert sheet["B6"].value == "問題あり"
+
+
+def test_missing_input_file_shows_error(tmp_path, capsys):
+    # 存在しないCSVを指定したとき、分かりやすいエラーを出してレポートを作らないこと。
+    missing_file = tmp_path / "no_such_file.csv"
+    output_file = tmp_path / "report.xlsx"
+
+    main([str(missing_file), "-o", str(output_file)])
+
+    assert "見つかりません" in capsys.readouterr().out
+    assert not output_file.exists()

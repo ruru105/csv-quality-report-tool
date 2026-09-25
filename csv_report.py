@@ -74,9 +74,16 @@ def main(argv=None):
 
     if not input_file.exists():
         print(f"エラー：{input_file} が見つかりません。")
-        return
+        return 1
 
-    data = read_csv_safely(input_file)
+    try:
+        data = read_csv_safely(input_file)
+    except pd.errors.EmptyDataError:
+        print(f"エラー：{input_file} にデータがありません。")
+        return 1
+    except (pd.errors.ParserError, ValueError) as error:
+        print(f"エラー：{input_file} を読み込めませんでした。({str(error).strip()})")
+        return 1
 
     row_count = len(data)
     column_count = len(data.columns)
@@ -137,7 +144,8 @@ def main(argv=None):
         f"重複件数={duplicate_count} / "
         f"判定={status}"
     )
+    return 0
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))

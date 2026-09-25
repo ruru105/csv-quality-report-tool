@@ -43,7 +43,9 @@ def test_report_generation(tmp_path, monkeypatch):
     )
     sample.to_csv("sample.csv", index=False, encoding="utf-8-sig")
 
-    main()
+    result = main()
+
+    assert result == 0
 
     report_file = tmp_path / "report.xlsx"
     assert report_file.exists()
@@ -76,8 +78,9 @@ def test_report_with_specified_files(tmp_path):
     )
     output_file = tmp_path / "my_report.xlsx"
 
-    main([str(csv_file), "-o", str(output_file)])
+    result = main([str(csv_file), "-o", str(output_file)])
 
+    assert result == 0
     assert output_file.exists()
 
     sheet = load_workbook(output_file, data_only=True)["検査結果"]
@@ -94,7 +97,38 @@ def test_missing_input_file_shows_error(tmp_path, capsys):
     missing_file = tmp_path / "no_such_file.csv"
     output_file = tmp_path / "report.xlsx"
 
-    main([str(missing_file), "-o", str(output_file)])
+    result = main([str(missing_file), "-o", str(output_file)])
 
+    assert result == 1
     assert "見つかりません" in capsys.readouterr().out
+    assert not output_file.exists()
+
+
+def test_empty_csv_shows_error(tmp_path, capsys):
+    # 空のCSVを指定したとき、分かりやすいエラーを出してレポートを作らないこと。
+    empty_file = tmp_path / "empty.csv"
+    empty_file.write_text("", encoding="utf-8-sig")
+    output_file = tmp_path / "report.xlsx"
+
+    result = main([str(empty_file), "-o", str(output_file)])
+
+    assert result == 1
+    assert "データがありません" in capsys.readouterr().out
+    assert not output_file.exists()
+
+
+def test_broken_csv_shows_error(tmp_path, capsys):
+    # 列数が行によって違う、壊れた形式のCSVを指定したとき、
+    # 分かりやすいエラーを出してレポートを作らないこと。
+    broken_file = tmp_path / "broken.csv"
+    broken_file.write_text(
+        "id,name\n1,Aoki\n2,Sato,Extra\n",
+        encoding="utf-8-sig",
+    )
+    output_file = tmp_path / "report.xlsx"
+
+    result = main([str(broken_file), "-o", str(output_file)])
+
+    assert result == 1
+    assert "読み込めませんでした" in capsys.readouterr().out
     assert not output_file.exists()

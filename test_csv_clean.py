@@ -148,3 +148,149 @@ def test_unwritable_output_shows_error(tmp_path, capsys):
 
     assert result == 1
     assert "保存できませんでした" in capsys.readouterr().out
+
+
+def test_where_keeps_only_matching_rows(tmp_path, capsys):
+    input_file = write_csv(
+        tmp_path / "input.csv",
+        "id,department\n1,Care\n2,Office\n3,Care\n",
+    )
+    output_file = tmp_path / "output.csv"
+
+    result = main(
+        [str(input_file), "-o", str(output_file), "--where", "department=Care"]
+    )
+
+    assert result == 0
+    assert read_output(output_file).to_dict("records") == [
+        {"id": "1", "department": "Care"},
+        {"id": "3", "department": "Care"},
+    ]
+    assert "データ件数=3→2" in capsys.readouterr().out
+
+
+def test_where_is_exact_match_not_partial(tmp_path):
+    # 「Care」を指定したとき、「Care部」のような部分一致は含めないこと。
+    input_file = write_csv(
+        tmp_path / "input.csv",
+        "id,department\n1,Care\n2,Care部\n",
+    )
+    output_file = tmp_path / "output.csv"
+
+    main([str(input_file), "-o", str(output_file), "--where", "department=Care"])
+
+    assert read_output(output_file).to_dict("records") == [
+        {"id": "1", "department": "Care"},
+    ]
+
+
+def test_where_no_match_creates_header_only_csv(tmp_path, capsys):
+    input_file = write_csv(tmp_path / "input.csv", "id,department\n1,Care\n")
+    output_file = tmp_path / "output.csv"
+
+    result = main(
+        [str(input_file), "-o", str(output_file), "--where", "department=Office"]
+    )
+
+    assert result == 0
+    saved = read_output(output_file)
+    assert list(saved.columns) == ["id", "department"]
+    assert len(saved) == 0
+    assert "データ件数=1→0" in capsys.readouterr().out
+
+
+def test_where_invalid_format_shows_error(tmp_path, capsys):
+    input_file = write_csv(tmp_path / "input.csv", "id,department\n1,Care\n")
+    output_file = tmp_path / "output.csv"
+
+    result = main(
+        [str(input_file), "-o", str(output_file), "--where", "department:Care"]
+    )
+
+    assert result == 1
+    assert "正しくありません" in capsys.readouterr().out
+    assert not output_file.exists()
+
+
+def test_where_unknown_column_shows_error(tmp_path, capsys):
+    input_file = write_csv(tmp_path / "input.csv", "id,department\n1,Care\n")
+    output_file = tmp_path / "output.csv"
+
+    result = main(
+        [str(input_file), "-o", str(output_file), "--where", "no_such_column=Care"]
+    )
+
+    assert result == 1
+    assert "見つかりません" in capsys.readouterr().out
+    assert not output_file.exists()
+
+
+def test_drop_single_column(tmp_path, capsys):
+    input_file = write_csv(
+        tmp_path / "input.csv",
+        "id,name,memo\n1,Aoki,内緒\n",
+    )
+    output_file = tmp_path / "output.csv"
+
+    result = main([str(input_file), "-o", str(output_file), "--drop", "memo"])
+
+    assert result == 0
+    assert list(read_output(output_file).columns) == ["id", "name"]
+    assert "削除した列=memo" in capsys.readouterr().out
+
+
+def test_drop_multiple_columns_with_comma(tmp_path):
+    input_file = write_csv(
+        tmp_path / "input.csv",
+        "id,name,memo,note\n1,Aoki,内緒,秘密\n",
+    )
+    output_file = tmp_path / "output.csv"
+
+    main([str(input_file), "-o", str(output_file), "--drop", "memo,note"])
+
+    assert list(read_output(output_file).columns) == ["id", "name"]
+
+
+def test_drop_unknown_column_shows_error(tmp_path, capsys):
+    input_file = write_csv(tmp_path / "input.csv", "id,name\n1,Aoki\n")
+    output_file = tmp_path / "output.csv"
+
+    result = main([str(input_file), "-o", str(output_file), "--drop", "no_such_column"])
+
+    assert result == 1
+    assert "見つかりません" in capsys.readouterr().out
+    assert not output_file.exists()
+
+
+def test_drop_all_columns_is_refused(tmp_path, capsys):
+    input_file = write_csv(tmp_path / "input.csv", "id,name\n1,Aoki\n")
+    output_file = tmp_path / "output.csv"
+
+    result = main([str(input_file), "-o", str(output_file), "--drop", "id,name"])
+
+    assert result == 1
+    assert "すべての列を削除することはできません" in capsys.readouterr().out
+    assert not output_file.exists()
+
+
+def test_where_and_drop_together(tmp_path):
+    # --where は絞り込みに使った列を、--drop であとから削除できること。
+    input_file = write_csv(
+        tmp_path / "input.csv",
+        "id,department,memo\n1,Care,内緒\n2,Office,内緒\n",
+    )
+    output_file = tmp_path / "output.csv"
+
+    main(
+        [
+            str(input_file),
+            "-o",
+            str(output_file),
+            "--where",
+            "department=Care",
+            "--drop",
+            "department,memo",
+        ]
+    )
+
+    assert read_output(output_file).to_dict("records") == [{"id": "1"}]

@@ -26,6 +26,20 @@ def parse_args(argv):
         default=DEFAULT_OUTPUT_FILE,
         help=f"整形結果を保存するCSVファイル(省略すると {DEFAULT_OUTPUT_FILE})",
     )
+    parser.add_argument(
+        "--drop",
+        help=(
+            "削除する列名。複数指定するときはカンマで区切る"
+            "(例: --drop 備考,メモ)"
+        ),
+    )
+    parser.add_argument(
+        "--where",
+        help=(
+            "残す行の条件を「列名=値」で指定する。値は完全に一致する行だけ残す"
+            "(例: --where 部署=Care)"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -76,6 +90,47 @@ def remove_duplicate_rows(data):
     return unique_data, len(data) - len(unique_data)
 
 
+def parse_where(condition):
+    """「列名=値」の形式を、列名と値に分ける。"""
+    if "=" not in condition:
+        raise ValueError(
+            f'--where の指定「{condition}」が正しくありません。'
+            "「列名=値」の形式で指定してください。"
+        )
+    column_name, _, value = condition.partition("=")
+    return column_name, value
+
+
+def filter_rows(data, column_name, value):
+    """指定した列が、指定した値と完全に一致する行だけ残す。
+
+    列名がCSVにないときはエラーにする。整形後のデータを返す。
+    """
+    if column_name not in data.columns:
+        raise ValueError(f"列名「{column_name}」がCSVに見つかりません。")
+    return data[data[column_name] == value]
+
+
+def drop_columns(data, column_names):
+    """指定した列名を、CSVから削除する。
+
+    指定した列名のうち、存在しないものがあればエラーにする。
+    削除したあとに列が1つも残らないときもエラーにする。
+    整形後のデータを返す。
+    """
+    missing = [name for name in column_names if name not in data.columns]
+    if missing:
+        raise ValueError(
+            "次の列名がCSVに見つかりません：" + "、".join(missing)
+        )
+
+    dropped_data = data.drop(columns=column_names)
+    if dropped_data.shape[1] == 0:
+        raise ValueError("すべての列を削除することはできません。")
+
+    return dropped_data
+
+
 def main(argv=None):
     args = parse_args(argv)
     input_file = Path(args.input_file)
@@ -106,6 +161,25 @@ def main(argv=None):
     data, space_count = trim_spaces(data)
     data, duplicate_count = remove_duplicate_rows(data)
 
+    if args.where:
+        try:
+            column_name, value = parse_where(args.where)
+            data = filter_rows(data, column_name, value)
+        except ValueError as error:
+            print(f"エラー：{error}")
+            return 1
+
+    dropped_columns = []
+    if args.drop:
+        dropped_columns = [
+            name.strip() for name in args.drop.split(",") if name.strip()
+        ]
+        try:
+            data = drop_columns(data, dropped_columns)
+        except ValueError as error:
+            print(f"エラー：{error}")
+            return 1
+
     try:
         data.to_csv(output_file, index=False, encoding="utf-8-sig")
     except OSError:
@@ -116,11 +190,14 @@ def main(argv=None):
         return 1
 
     print(f"完了：{output_file} を作成しました。")
-    print(
+    stats = (
         f"データ件数={row_count}→{len(data)} / "
         f"空白を消した箇所={space_count} / "
         f"取り除いた重複行={duplicate_count}"
     )
+    if dropped_columns:
+        stats += " / 削除した列=" + "、".join(dropped_columns)
+    print(stats)
     return 0
 
 

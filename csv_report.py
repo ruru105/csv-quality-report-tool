@@ -1,5 +1,7 @@
 import argparse
 import sys
+import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -8,6 +10,12 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 DEFAULT_INPUT_FILE = "sample.csv"
 DEFAULT_OUTPUT_FILE = "report.xlsx"
+
+# 総合判定のセルを目立たせる色(薄い塗りつぶし・濃い文字色)。
+STATUS_STYLES = {
+    "問題あり": {"fill": "FFC7CE", "font": "9C0006"},
+    "問題なし": {"fill": "C6EFCE", "font": "006100"},
+}
 
 
 def parse_args(argv):
@@ -41,6 +49,18 @@ def read_csv_safely(file_path):
     raise ValueError("CSVの文字コードを判定できませんでした。")
 
 
+def visual_width(text):
+    """全角文字を2、半角文字を1として数えた、見た目の幅を返す。
+
+    日本語の見出しは、文字数だけで列幅を決めると右端が切れることがあるため、
+    見た目の幅で列幅を決める。
+    """
+    width = 0
+    for char in text:
+        width += 2 if unicodedata.east_asian_width(char) in ("F", "W") else 1
+    return width
+
+
 def format_workbook(writer):
     """Excelレポートを読みやすく整える。"""
     header_fill = PatternFill("solid", fgColor="1F4E78")
@@ -56,14 +76,30 @@ def format_workbook(writer):
             cell.alignment = Alignment(horizontal="center")
 
         for column_cells in worksheet.columns:
-            max_length = max(
-                len(str(cell.value)) if cell.value is not None else 0
+            max_width = max(
+                visual_width(str(cell.value)) if cell.value is not None else 0
                 for cell in column_cells
             )
             column_letter = column_cells[0].column_letter
             worksheet.column_dimensions[column_letter].width = min(
-                max(max_length + 2, 12), 40
+                max(max_width + 2, 12), 45
             )
+
+
+def highlight_summary_sheet(writer):
+    """「検査結果」シートの総合判定を目立たせ、結果列の寄せをそろえる。"""
+    worksheet = writer.book["検査結果"]
+
+    for row in worksheet.iter_rows(min_row=2):
+        label_cell, value_cell = row[0], row[1]
+        # 数字と文字が混ざっていても、結果列の寄せをそろえる。
+        value_cell.alignment = Alignment(horizontal="left")
+
+        if label_cell.value == "総合判定":
+            style = STATUS_STYLES.get(value_cell.value)
+            if style:
+                value_cell.fill = PatternFill("solid", fgColor=style["fill"])
+                value_cell.font = Font(color=style["font"], bold=True)
 
 
 def main(argv=None):
@@ -96,9 +132,13 @@ def main(argv=None):
         else "問題なし"
     )
 
+    checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     summary = pd.DataFrame(
         {
             "確認項目": [
+                "検査したCSV",
+                "検査日時",
                 "データ件数",
                 "列数",
                 "欠損セル数",
@@ -106,6 +146,8 @@ def main(argv=None):
                 "総合判定",
             ],
             "結果": [
+                str(input_file),
+                checked_at,
                 row_count,
                 column_count,
                 missing_count,
@@ -136,6 +178,7 @@ def main(argv=None):
         data.to_excel(writer, sheet_name="元データ", index=False)
 
         format_workbook(writer)
+        highlight_summary_sheet(writer)
 
     print(f"完了：{output_file} を作成しました。")
     print(

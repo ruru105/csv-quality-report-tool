@@ -1,7 +1,7 @@
 import pandas as pd
 from openpyxl import load_workbook
 
-from csv_report import read_csv_safely, main
+from csv_report import read_csv_safely, main, visual_width
 
 
 def test_read_csv_utf8(tmp_path):
@@ -62,11 +62,15 @@ def test_report_generation(tmp_path, monkeypatch):
 
     sheet = workbook["検査結果"]
 
-    assert sheet["B2"].value == 5
-    assert sheet["B3"].value == 4
-    assert sheet["B4"].value == 2
-    assert sheet["B5"].value == 1
-    assert sheet["B6"].value == "問題あり"
+    assert sheet["A2"].value == "検査したCSV"
+    assert sheet["B2"].value == "sample.csv"
+    assert sheet["A3"].value == "検査日時"
+    assert sheet["B3"].value  # 日時が何かしら入っていること(値そのものは時刻依存のため確認しない)
+    assert sheet["B4"].value == 5
+    assert sheet["B5"].value == 4
+    assert sheet["B6"].value == 2
+    assert sheet["B7"].value == 1
+    assert sheet["B8"].value == "問題あり"
 
 
 def test_report_with_specified_files(tmp_path):
@@ -85,11 +89,12 @@ def test_report_with_specified_files(tmp_path):
 
     sheet = load_workbook(output_file, data_only=True)["検査結果"]
 
-    assert sheet["B2"].value == 3
-    assert sheet["B3"].value == 2
-    assert sheet["B4"].value == 2
-    assert sheet["B5"].value == 1
-    assert sheet["B6"].value == "問題あり"
+    assert sheet["B2"].value == str(csv_file)
+    assert sheet["B4"].value == 3
+    assert sheet["B5"].value == 2
+    assert sheet["B6"].value == 2
+    assert sheet["B7"].value == 1
+    assert sheet["B8"].value == "問題あり"
 
 
 def test_missing_input_file_shows_error(tmp_path, capsys):
@@ -132,3 +137,45 @@ def test_broken_csv_shows_error(tmp_path, capsys):
     assert result == 1
     assert "読み込めませんでした" in capsys.readouterr().out
     assert not output_file.exists()
+
+
+def test_visual_width_counts_full_width_characters_as_two():
+    # 半角英字は1、日本語(全角)は2として数えること。
+    assert visual_width("id") == 2
+    assert visual_width("有効データ数") == 12
+
+
+def test_status_cell_is_highlighted_when_problem_found(tmp_path):
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_text(
+        "id,name\n1,Aoki\n2,\n",
+        encoding="utf-8-sig",
+    )
+    output_file = tmp_path / "report.xlsx"
+
+    main([str(csv_file), "-o", str(output_file)])
+
+    sheet = load_workbook(output_file)["検査結果"]
+    status_cell = sheet["B8"]
+
+    assert status_cell.value == "問題あり"
+    assert status_cell.fill.fgColor.rgb == "00FFC7CE"
+    assert status_cell.font.color.rgb == "009C0006"
+
+
+def test_status_cell_is_highlighted_when_no_problem(tmp_path):
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_text(
+        "id,name\n1,Aoki\n2,Sato\n",
+        encoding="utf-8-sig",
+    )
+    output_file = tmp_path / "report.xlsx"
+
+    main([str(csv_file), "-o", str(output_file)])
+
+    sheet = load_workbook(output_file)["検査結果"]
+    status_cell = sheet["B8"]
+
+    assert status_cell.value == "問題なし"
+    assert status_cell.fill.fgColor.rgb == "00C6EFCE"
+    assert status_cell.font.color.rgb == "00006100"

@@ -11,6 +11,10 @@ from openpyxl.styles import Alignment, Font, PatternFill
 DEFAULT_INPUT_FILE = "sample.csv"
 DEFAULT_OUTPUT_FILE = "report.xlsx"
 
+# カンマ区切りとして読んだ結果が1列だけになったとき、
+# 見出しにこれらの文字が含まれていれば、その文字を区切り文字として読み直す。
+CANDIDATE_DELIMITERS = ["\t", ";", "|"]
+
 # 総合判定のセルを目立たせる色(薄い塗りつぶし・濃い文字色)。
 STATUS_STYLES = {
     "問題あり": {"fill": "FFC7CE", "font": "9C0006"},
@@ -39,14 +43,33 @@ def parse_args(argv):
 
 
 def read_csv_safely(file_path):
-    """UTF-8とWindows用の文字コードに対応してCSVを読み込む。"""
+    """UTF-8とWindows用の文字コードに対応してCSVを読み込む。
+
+    カンマ区切りとして読んだ結果、列が1つにまとまってしまったときは、
+    見出しに含まれる記号(タブなど)から区切り文字を判断して読み直す。
+    """
     for encoding in ("utf-8-sig", "cp932"):
         try:
-            return pd.read_csv(file_path, encoding=encoding)
+            data = pd.read_csv(file_path, encoding=encoding)
         except UnicodeDecodeError:
             continue
 
+        return _reread_if_wrong_delimiter(data, file_path, encoding)
+
     raise ValueError("CSVの文字コードを判定できませんでした。")
+
+
+def _reread_if_wrong_delimiter(data, file_path, encoding):
+    """1列だけの読み込み結果を確認し、区切り文字の判定違いなら読み直す。"""
+    if len(data.columns) != 1:
+        return data
+
+    header = str(data.columns[0])
+    for delimiter in CANDIDATE_DELIMITERS:
+        if delimiter in header:
+            return pd.read_csv(file_path, encoding=encoding, sep=delimiter)
+
+    return data
 
 
 def visual_width(text):

@@ -30,6 +30,47 @@ def test_read_csv_cp932(tmp_path):
     assert data.loc[0, "name"] == "青木"
 
 
+def test_read_csv_tab_separated(tmp_path):
+    # FX取引ソフトの出力など、タブ区切りのファイルも正しく列を分けて読めること。
+    csv_file = tmp_path / "tab.csv"
+    csv_file.write_text(
+        "id\tname\n1\tAoki\n2\tSato\n",
+        encoding="utf-8-sig",
+    )
+
+    data = read_csv_safely(csv_file)
+
+    assert list(data.columns) == ["id", "name"]
+    assert len(data) == 2
+
+
+def test_read_csv_semicolon_separated(tmp_path):
+    csv_file = tmp_path / "semi.csv"
+    csv_file.write_text(
+        "id;name\n1;Aoki\n2;Sato\n",
+        encoding="utf-8-sig",
+    )
+
+    data = read_csv_safely(csv_file)
+
+    assert list(data.columns) == ["id", "name"]
+    assert len(data) == 2
+
+
+def test_read_csv_genuinely_single_column_stays_single_column(tmp_path):
+    # 区切り文字を含まない、もともと1列だけのCSVを誤って分割しないこと。
+    csv_file = tmp_path / "single.csv"
+    csv_file.write_text(
+        "name\nAoki\nSato\n",
+        encoding="utf-8-sig",
+    )
+
+    data = read_csv_safely(csv_file)
+
+    assert list(data.columns) == ["name"]
+    assert len(data) == 2
+
+
 def test_report_generation(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 

@@ -294,3 +294,44 @@ def test_where_and_drop_together(tmp_path):
     )
 
     assert read_output(output_file).to_dict("records") == [{"id": "1"}]
+
+
+def test_tab_separated_input_is_split_into_columns(tmp_path):
+    # FX取引ソフトの出力など、タブ区切りのファイルも正しく列を分けて整形できること。
+    input_file = write_csv(tmp_path / "input.csv", "id\tname\n1\tAoki\n2\tSato\n")
+    output_file = tmp_path / "output.csv"
+
+    result = main([str(input_file), "-o", str(output_file)])
+
+    assert result == 0
+    assert read_output(output_file).to_dict("records") == [
+        {"id": "1", "name": "Aoki"},
+        {"id": "2", "name": "Sato"},
+    ]
+
+
+def test_semicolon_separated_input_is_split_into_columns(tmp_path):
+    input_file = write_csv(tmp_path / "input.csv", "id;name\n1;Aoki\n2;Sato\n")
+    output_file = tmp_path / "output.csv"
+
+    result = main([str(input_file), "-o", str(output_file)])
+
+    assert result == 0
+    assert read_output(output_file).to_dict("records") == [
+        {"id": "1", "name": "Aoki"},
+        {"id": "2", "name": "Sato"},
+    ]
+
+
+def test_genuinely_single_column_input_stays_single_column(tmp_path):
+    # 区切り文字を含まない、もともと1列だけのCSVを誤って分割しないこと。
+    input_file = write_csv(tmp_path / "input.csv", "name\nAoki\nSato\n")
+    output_file = tmp_path / "output.csv"
+
+    result = main([str(input_file), "-o", str(output_file)])
+
+    assert result == 0
+    assert read_output(output_file).to_dict("records") == [
+        {"name": "Aoki"},
+        {"name": "Sato"},
+    ]

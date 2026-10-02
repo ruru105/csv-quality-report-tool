@@ -1,4 +1,6 @@
-# CSV Quality Report Tool
+# CSVチェッカー(CSV Checker)
+
+旧称:CSV Quality Report Tool(GitHubのリポジトリ名は`csv-quality-report-tool`のままです)。
 
 [![Python tests](https://github.com/ruru105/csv-quality-report-tool/actions/workflows/main.yml/badge.svg)](https://github.com/ruru105/csv-quality-report-tool/actions/workflows/main.yml)
 

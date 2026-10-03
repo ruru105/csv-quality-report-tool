@@ -1,4 +1,7 @@
+import os
+
 import pandas as pd
+import pytest
 from openpyxl import load_workbook
 
 from csv_report import read_csv_safely, main, visual_width
@@ -220,3 +223,49 @@ def test_status_cell_is_highlighted_when_no_problem(tmp_path):
     assert status_cell.value == "問題なし"
     assert status_cell.fill.fgColor.rgb == "00C6EFCE"
     assert status_cell.font.color.rgb == "00006100"
+
+
+def test_same_input_and_output_is_refused(tmp_path, capsys):
+    # 検査するCSVと同じ名前を保存先にしたとき、元のCSVをExcelで上書きせず、エラーにすること。
+    input_file = tmp_path / "input.csv"
+    input_file.write_text("id,name\n1,Aoki\n", encoding="utf-8")
+    before = input_file.read_bytes()
+
+    result = main([str(input_file), "-o", str(input_file)])
+
+    assert result == 1
+    assert "元のファイルを書き換えない" in capsys.readouterr().out
+    assert input_file.read_bytes() == before
+
+
+def test_same_file_written_differently_is_refused(tmp_path, capsys):
+    # パスの書き方が違っても(フォルダをたどる形)、実体が同じなら止めること。
+    input_file = tmp_path / "input.csv"
+    input_file.write_text("id,name\n1,Aoki\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    before = input_file.read_bytes()
+    roundabout = tmp_path / "sub" / ".." / "input.csv"
+
+    result = main([str(input_file), "-o", str(roundabout)])
+
+    assert result == 1
+    assert "元のファイルを書き換えない" in capsys.readouterr().out
+    assert input_file.read_bytes() == before
+
+
+def test_hard_link_to_input_is_refused(tmp_path, capsys):
+    # 別名(ハードリンク)でも、実体が同じCSVなら上書きしないこと。
+    input_file = tmp_path / "input.csv"
+    input_file.write_text("id,name\n1,Aoki\n", encoding="utf-8")
+    alias = tmp_path / "alias.csv"
+    try:
+        os.link(input_file, alias)
+    except (OSError, NotImplementedError):
+        pytest.skip("この環境ではハードリンクを作れません")
+    before = input_file.read_bytes()
+
+    result = main([str(input_file), "-o", str(alias)])
+
+    assert result == 1
+    assert input_file.read_bytes() == before
+    assert alias.read_bytes() == before

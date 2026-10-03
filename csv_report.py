@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 import unicodedata
 from datetime import datetime
@@ -40,6 +41,17 @@ def parse_args(argv):
         help=f"作成するExcelファイル(省略すると {DEFAULT_OUTPUT_FILE})",
     )
     return parser.parse_args(argv)
+
+
+def is_same_file(first, second):
+    """2つのパスが、同じファイルを指していればTrueを返す。
+
+    書き方が違っても(./を付ける・フォルダをたどる・ハードリンクなど)、
+    実体が同じなら同じものとして扱う。
+    """
+    if first.resolve() == second.resolve():
+        return True
+    return second.exists() and os.path.samefile(first, second)
 
 
 def read_csv_safely(file_path):
@@ -133,6 +145,14 @@ def main(argv=None):
 
     if not input_file.exists():
         print(f"エラー：{input_file} が見つかりません。")
+        return 1
+
+    # 入力のCSVを、Excelで上書きしてしまわないようにする。
+    if is_same_file(input_file, output_file):
+        print(
+            "エラー：保存先が、検査するCSVと同じです。"
+            "元のファイルを書き換えないように、別の名前を指定してください。"
+        )
         return 1
 
     try:

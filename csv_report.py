@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 
+from csv_history import HistoryError, format_history, load_history, open_history, record_inspection
 from csv_rules import RulesError, evaluate_rules, load_rules
 
 
@@ -61,6 +62,18 @@ def parse_args(argv):
         "--folder",
         default=None,
         help="このフォルダの中の .csv をまとめて検査します(サブフォルダは対象外)",
+    )
+    parser.add_argument(
+        "--history",
+        default=None,
+        metavar="DB",
+        help="検査結果をこのSQLiteファイルに記録します(なければ作ります。検査のたびに追記)",
+    )
+    parser.add_argument(
+        "--show-history",
+        default=None,
+        metavar="DB",
+        help="記録された検査結果を、前回との違いつきで表示します(検査はしません)",
     )
     return parser.parse_args(argv)
 
@@ -281,6 +294,7 @@ def inspect_csv(input_file, output_file, rules=None, config_path=None):
 
     return {
         "error": None,
+        "checked_at": checked_at,
         "rows": row_count,
         "columns": column_count,
         "missing": missing_count,
@@ -362,7 +376,7 @@ def write_folder_summary(output_folder, folder, rows, rules_path, has_rules):
     return path
 
 
-def run_folder(args, rules):
+def run_folder(args, rules, history=None):
     """フォルダの中のCSVをまとめて検査する。CSVごとのExcelと、一覧(summary.xlsx)を作る。"""
     if args.input_file:
         print("エラー：--folder と、CSVファイルの指定は同時に使えません。")
@@ -390,6 +404,12 @@ def run_folder(args, rules):
     for csv_file in csv_files:
         report_name = unique_report_name(csv_file, used_names)
         result = inspect_csv(csv_file, output_folder / report_name, rules, args.config)
+        if history is not None:
+            try:
+                record_inspection(history, csv_file, result, args.config)
+            except HistoryError as error:
+                print(f"エラー：{error}")
+                return 1
         row = {"ファイル名": csv_file.name}
         if result["error"]:
             row.update({"判定": "エラー", "レポート": "", "内容": result["error"]})
@@ -420,6 +440,8 @@ def run_folder(args, rules):
         f"問題あり={counts['問題あり']} / エラー={counts['エラー']})。"
     )
     print(f"一覧：{summary_path}")
+    if history is not None:
+        print(f"記録：{args.history} に追記しました。")
     return 1 if counts["エラー"] else 0
 
 
@@ -435,13 +457,57 @@ def main(argv=None):
             print(f"エラー：{error}")
             return 1
 
+    if args.show_history:
+        return show_history(args)
+
+    history = None
+    if args.history:
+        try:
+            history = open_history(args.history)
+        except HistoryError as error:
+            print(f"エラー：{error}")
+            return 1
+
+    try:
+        return run_inspection(args, rules, history)
+    finally:
+        if history is not None:
+            history.close()
+
+
+def show_history(args):
+    """--show-history:記録を表示するだけ。検査はしない。"""
+    if args.input_file or args.folder or args.history or args.config:
+        print("エラー：--show-history は、検査の指定(CSV・--folder・--history・--config)と同時に使えません。")
+        return 1
+    try:
+        records = load_history(args.show_history)
+    except HistoryError as error:
+        print(f"エラー：{error}")
+        return 1
+    if not records:
+        print("記録がありません。")
+        return 0
+    for line in format_history(records):
+        print(line)
+    print(f"合計 {len(records)} 件の記録")
+    return 0
+
+
+def run_inspection(args, rules, history):
     if args.folder:
-        return run_folder(args, rules)
+        return run_folder(args, rules, history)
 
     input_file = Path(args.input_file or DEFAULT_INPUT_FILE)
     output_file = Path(args.output or DEFAULT_OUTPUT_FILE)
 
     result = inspect_csv(input_file, output_file, rules, args.config)
+    if history is not None:
+        try:
+            record_inspection(history, input_file, result, args.config)
+        except HistoryError as error:
+            print(f"エラー：{error}")
+            return 1
     if result["error"]:
         print(f"エラー：{result['error']}")
         return 1
@@ -456,6 +522,8 @@ def main(argv=None):
         f"重複件数={result['duplicates']} / "
         f"判定={result['status']}"
     )
+    if history is not None:
+        print(f"記録：{args.history} に追記しました。")
     return 0
 
 

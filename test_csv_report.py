@@ -269,3 +269,77 @@ def test_hard_link_to_input_is_refused(tmp_path, capsys):
     assert result == 1
     assert input_file.read_bytes() == before
     assert alias.read_bytes() == before
+
+
+def read_sheet(path, sheet_name):
+    workbook = load_workbook(path)
+    return [
+        tuple(cell.value for cell in row)
+        for row in workbook[sheet_name].iter_rows()
+    ]
+
+
+def test_leading_zero_id_is_not_duplicate_of_plain_number(tmp_path):
+    # 「007」と「7」は別のIDなので、重複として数えないこと。
+    input_file = tmp_path / "ids.csv"
+    input_file.write_text("id,name\n007,Sato\n7,Sato\n1002,Aoki\n", encoding="utf-8")
+    output_file = tmp_path / "out.xlsx"
+
+    result = main([str(input_file), "-o", str(output_file)])
+
+    assert result == 0
+    summary = dict(read_sheet(output_file, "検査結果")[1:])
+    assert summary["重複件数"] == 0
+    assert summary["総合判定"] == "問題なし"
+    assert read_sheet(output_file, "重複行") == [("id", "name")]
+
+
+def test_leading_zero_is_kept_in_original_data_sheet(tmp_path):
+    # 元データのシートでも、先頭の0が消えないこと(文字のまま残る)。
+    input_file = tmp_path / "ids.csv"
+    input_file.write_text("id,name\n007,Sato\n7,Sato\n1002,Aoki\n", encoding="utf-8")
+    output_file = tmp_path / "out.xlsx"
+
+    main([str(input_file), "-o", str(output_file)])
+
+    rows = read_sheet(output_file, "元データ")
+    assert [row[0] for row in rows[1:]] == ["007", "7", "1002"]
+
+
+def test_columns_without_leading_zero_stay_numeric(tmp_path):
+    # 先頭に0がない列は、これまでどおり数値のまま保存すること。
+    input_file = tmp_path / "ids.csv"
+    input_file.write_text("id,amount\n007,100\n008,250\n", encoding="utf-8")
+    output_file = tmp_path / "out.xlsx"
+
+    main([str(input_file), "-o", str(output_file)])
+
+    rows = read_sheet(output_file, "元データ")
+    assert rows[1] == ("007", 100)
+    assert rows[2] == ("008", 250)
+
+
+def test_real_duplicates_with_leading_zero_are_still_counted(tmp_path):
+    # 本当に同じ行(007が2回)は、これまでどおり重複として数えること。
+    input_file = tmp_path / "ids.csv"
+    input_file.write_text("id,name\n007,Sato\n007,Sato\n1002,Aoki\n", encoding="utf-8")
+    output_file = tmp_path / "out.xlsx"
+
+    main([str(input_file), "-o", str(output_file)])
+
+    summary = dict(read_sheet(output_file, "検査結果")[1:])
+    assert summary["重複件数"] == 1
+    assert read_sheet(output_file, "重複行")[1:] == [("007", "Sato"), ("007", "Sato")]
+
+
+def test_missing_cells_are_still_counted_with_text_comparison(tmp_path):
+    # 文字として比べるようにしても、欠損の数え方は変わらないこと。
+    input_file = tmp_path / "gaps.csv"
+    input_file.write_text("id,name\n1,Aoki\n2,\n,Sato\n", encoding="utf-8")
+    output_file = tmp_path / "out.xlsx"
+
+    main([str(input_file), "-o", str(output_file)])
+
+    summary = dict(read_sheet(output_file, "検査結果")[1:])
+    assert summary["欠損セル数"] == 2
+    assert len(read_sheet(output_file, "欠損行")) == 3

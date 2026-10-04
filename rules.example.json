@@ -1,0 +1,5 @@
+{
+  "required_columns": ["employee_id", "name"],
+  "not_null_columns": ["employee_id", "name"],
+  "unique_columns": ["employee_id"]
+}

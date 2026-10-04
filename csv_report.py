@@ -8,6 +8,8 @@ from pathlib import Path
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 
+from csv_rules import RulesError, evaluate_rules, load_rules
+
 
 DEFAULT_INPUT_FILE = "sample.csv"
 DEFAULT_OUTPUT_FILE = "report.xlsx"
@@ -41,6 +43,12 @@ def parse_args(argv):
         "--output",
         default=DEFAULT_OUTPUT_FILE,
         help=f"作成するExcelファイル(省略すると {DEFAULT_OUTPUT_FILE})",
+    )
+    parser.add_argument(
+        "-c",
+        "--config",
+        default=None,
+        help="検査ルールを書いたJSONファイル(省略すると、すべての列を対象に検査します)",
     )
     return parser.parse_args(argv)
 
@@ -174,6 +182,14 @@ def main(argv=None):
         )
         return 1
 
+    rules = None
+    if args.config:
+        try:
+            rules = load_rules(args.config)
+        except RulesError as error:
+            print(f"エラー：{error}")
+            return 1
+
     try:
         data = read_csv_safely(input_file)
         # 重複・欠損の判定は、CSVに書かれた文字のまま行う(007と7を同じ値にしない)。
@@ -192,36 +208,33 @@ def main(argv=None):
     missing_count = int(text.isna().sum().sum())
     duplicate_count = int(text.duplicated().sum())
 
-    status = (
-        "問題あり"
-        if missing_count > 0 or duplicate_count > 0
-        else "問題なし"
-    )
+    if rules is None:
+        missing_mask = text.isna().any(axis=1)
+        duplicate_mask = text.duplicated(keep=False)
+        rule_results = None
+        status = (
+            "問題あり"
+            if missing_count > 0 or duplicate_count > 0
+            else "問題なし"
+        )
+    else:
+        # 設定ファイルがあるときは、ルールに違反したかどうかで判定する。
+        evaluation = evaluate_rules(text, rules)
+        missing_mask = evaluation["missing_rows"]
+        duplicate_mask = evaluation["duplicate_rows"]
+        rule_results = evaluation["results"]
+        status = "問題あり" if evaluation["violations"] > 0 else "問題なし"
 
     checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    summary = pd.DataFrame(
-        {
-            "確認項目": [
-                "検査したCSV",
-                "検査日時",
-                "データ件数",
-                "列数",
-                "欠損セル数",
-                "重複件数",
-                "総合判定",
-            ],
-            "結果": [
-                str(input_file),
-                checked_at,
-                row_count,
-                column_count,
-                missing_count,
-                duplicate_count,
-                status,
-            ],
-        }
-    )
+    items = ["検査したCSV", "検査日時", "データ件数", "列数", "欠損セル数", "重複件数"]
+    values = [str(input_file), checked_at, row_count, column_count, missing_count, duplicate_count]
+    if rule_results is not None:
+        items += ["検査ルール(設定ファイル)", "ルール違反数"]
+        values += [str(args.config), evaluation["violations"]]
+    items.append("総合判定")
+    values.append(status)
+    summary = pd.DataFrame({"確認項目": items, "結果": values})
 
     column_info = pd.DataFrame(
         {
@@ -233,11 +246,21 @@ def main(argv=None):
         }
     )
 
-    missing_rows = data[text.isna().any(axis=1)]
-    duplicate_rows = data[text.duplicated(keep=False)]
+    missing_rows = data[missing_mask]
+    duplicate_rows = data[duplicate_mask]
 
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         summary.to_excel(writer, sheet_name="検査結果", index=False)
+        if rule_results is not None:
+            rule_table = pd.DataFrame(
+                {
+                    "ルール": [r["rule"] for r in rule_results],
+                    "設定": [r["setting"] for r in rule_results],
+                    "結果": ["OK" if r["ok"] else "NG" for r in rule_results],
+                    "内容": [r["detail"] for r in rule_results],
+                }
+            )
+            rule_table.to_excel(writer, sheet_name="ルール判定", index=False)
         column_info.to_excel(writer, sheet_name="列情報", index=False)
         missing_rows.to_excel(writer, sheet_name="欠損行", index=False)
         duplicate_rows.to_excel(writer, sheet_name="重複行", index=False)
@@ -247,6 +270,9 @@ def main(argv=None):
         highlight_summary_sheet(writer)
 
     print(f"完了：{output_file} を作成しました。")
+    if rule_results is not None:
+        for r in rule_results:
+            print(f"ルール {'OK' if r['ok'] else 'NG'}：{r['rule']}({r['setting']}) {r['detail']}")
     print(
         f"データ件数={row_count} / "
         f"欠損セル数={missing_count} / "

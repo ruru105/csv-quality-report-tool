@@ -2,6 +2,10 @@
 import sqlite3
 from pathlib import Path
 
+from openpyxl import Workbook
+from openpyxl.chart import LineChart, Reference
+from openpyxl.styles import Alignment, Font, PatternFill
+
 TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS inspections (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,6 +97,11 @@ def load_history(db_path, file_name=None, limit=None):
         raise HistoryError(f"記録を読み込めませんでした。({error})") from error
     finally:
         connection.close()
+    # 前回との違いは、絞り込む前の記録全体で計算する(件数を絞っても、先頭が「初回」にならないように)
+    last_by_file = {}
+    for record in records:
+        record["change"] = describe_changes(last_by_file.get(record["csv_path"]), record)
+        last_by_file[record["csv_path"]] = record
     if limit is not None and limit > 0:
         # CSVごとに、新しい順で limit 件だけ残す(古い順の並びは保つ)。
         keep = set()
@@ -126,7 +135,7 @@ def format_history(records):
     lines = []
     last_by_file = {}
     for record in records:
-        change = describe_changes(last_by_file.get(record["csv_path"]), record)
+        change = record.get("change") or describe_changes(last_by_file.get(record["csv_path"]), record)
         if record["status"] == "エラー":
             detail = f"エラー：{record['error']}"
         else:
@@ -139,3 +148,66 @@ def format_history(records):
         lines.append(f"{record['checked_at']}  {record['file_name']}  {detail}  [{change}]")
         last_by_file[record["csv_path"]] = record
     return lines
+
+
+EXPORT_SHEET_NAME = "履歴"
+EXPORT_HEADERS = [
+    "検査日時", "ファイル名", "判定", "データ件数", "列数", "欠損セル数",
+    "重複件数", "ルール違反数", "前回との違い", "エラーの内容", "CSVの場所",
+]
+
+
+def export_history_excel(records, output_path):
+    """記録をExcelに書き出す。1つのCSVの記録が2回分以上あれば、欠損・重複の推移グラフも付ける。"""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = EXPORT_SHEET_NAME
+    sheet.append(EXPORT_HEADERS)
+
+    last_by_file = {}
+    for record in records:
+        change = record.get("change") or describe_changes(last_by_file.get(record["csv_path"]), record)
+        last_by_file[record["csv_path"]] = record
+        sheet.append([
+            record["checked_at"], record["file_name"], record["status"], record["rows"],
+            record["columns"], record["missing"], record["duplicates"], record["violations"],
+            change, record["error"] or "", record["csv_path"],
+        ])
+
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    sheet.freeze_panes = "A2"
+    widths = [20, 24, 10, 12, 8, 12, 10, 14, 50, 30, 50]
+    for index, width in enumerate(widths):
+        sheet.column_dimensions[chr(ord("A") + index)].width = width
+
+    paths = {record["csv_path"] for record in records}
+    numeric_rows = [r for r in records if r["status"] != "エラー"]
+    if len(paths) == 1 and len(numeric_rows) >= 2:
+        _add_trend_chart(workbook, numeric_rows)
+
+    try:
+        workbook.save(str(output_path))
+    except OSError as error:
+        raise HistoryError(f"Excelを保存できませんでした。({error})") from error
+
+
+def _add_trend_chart(workbook, numeric_rows):
+    """欠損セル数と重複件数が、検査のたびにどう変わったかを折れ線グラフにする。"""
+    sheet = workbook.create_sheet("推移")
+    sheet.append(["検査日時", "欠損セル数", "重複件数"])
+    for record in numeric_rows:
+        sheet.append([record["checked_at"], record["missing"], record["duplicates"]])
+    chart = LineChart()
+    chart.title = f"{numeric_rows[0]['file_name']} の推移"
+    chart.y_axis.title = "件数"
+    chart.x_axis.title = "検査日時"
+    data = Reference(sheet, min_col=2, max_col=3, min_row=1, max_row=len(numeric_rows) + 1)
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(Reference(sheet, min_col=1, min_row=2, max_row=len(numeric_rows) + 1))
+    chart.width, chart.height = 20, 9
+    sheet.add_chart(chart, "E2")
+    sheet.column_dimensions["A"].width = 20

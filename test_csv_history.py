@@ -182,3 +182,100 @@ def test_load_history_can_filter_and_limit(tmp_path):
 def test_load_history_missing_file_raises(tmp_path):
     with pytest.raises(HistoryError):
         load_history(tmp_path / "nothing.db")
+
+
+def make_history(tmp_path):
+    """a.csvを3回(欠損が増える)、b.csvを1回検査した記録を作る。"""
+    db = tmp_path / "h.db"
+    a = tmp_path / "a.csv"
+    b = write(tmp_path / "b.csv", "id\n1\n")
+    for text in ("id,name\n1,A\n2,B\n", "id,name\n1,A\n2,\n", "id,name\n1,\n2,\n"):
+        write(a, text)
+        main([str(a), "-o", str(tmp_path / "r.xlsx"), "--history", str(db)])
+    main([str(b), "-o", str(tmp_path / "r.xlsx"), "--history", str(db)])
+    return db
+
+
+def test_history_name_shows_only_that_csv(tmp_path, capsys):
+    db = make_history(tmp_path)
+    capsys.readouterr()
+    assert main(["--show-history", str(db), "--history-name", "b.csv"]) == 0
+    out = capsys.readouterr().out
+    assert "b.csv" in out and "a.csv" not in out
+    assert "合計 1 件" in out
+
+
+def test_history_name_without_match_says_so(tmp_path, capsys):
+    db = make_history(tmp_path)
+    capsys.readouterr()
+    assert main(["--show-history", str(db), "--history-name", "zzz.csv"]) == 0
+    assert "zzz.csv の記録がありません" in capsys.readouterr().out
+
+
+def test_history_limit_keeps_newest_per_csv(tmp_path, capsys):
+    db = make_history(tmp_path)
+    capsys.readouterr()
+    assert main(["--show-history", str(db), "--history-limit", "1"]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert "合計 2 件" in lines[-1]
+    a_line = [line for line in lines if "a.csv" in line][0]
+    assert "欠損セル数=2" in a_line  # 3回目(最新)が残る
+    # 絞り込んでも、前回(2回目)との違いが出る(「初回」にはならない)
+    assert "欠損セル数 1→2(+1)" in a_line
+    assert "[初回]" not in a_line
+
+
+def test_history_limit_must_be_positive(tmp_path, capsys):
+    db = make_history(tmp_path)
+    capsys.readouterr()
+    assert main(["--show-history", str(db), "--history-limit", "0"]) == 1
+    assert "1以上" in capsys.readouterr().out
+
+
+def test_history_filter_options_need_show_history(tmp_path, capsys):
+    csv = write(tmp_path / "a.csv", "id\n1\n")
+    for extra in (["--history-name", "a.csv"], ["--history-limit", "2"], ["--history-excel", str(tmp_path / "x.xlsx")]):
+        assert main([str(csv), "-o", str(tmp_path / "r.xlsx")] + extra) == 1
+        assert "--show-history と一緒に使います" in capsys.readouterr().out
+
+
+def test_history_excel_has_rows_and_trend_chart_for_one_csv(tmp_path):
+    from openpyxl import load_workbook
+
+    db = make_history(tmp_path)
+    out = tmp_path / "history.xlsx"
+    assert main(["--show-history", str(db), "--history-name", "a.csv", "--history-excel", str(out)]) == 0
+    book = load_workbook(out)
+    rows = [[c.value for c in row] for row in book["履歴"].iter_rows()]
+    assert rows[0][:3] == ["検査日時", "ファイル名", "判定"]
+    assert len(rows) == 4  # 見出し+3回分
+    assert rows[1][8] == "初回"
+    assert "欠損セル数 0→1(+1)" in rows[2][8]
+    assert [r[5] for r in rows[1:]] == [0, 1, 2]
+    trend = book["推移"]
+    assert len(trend._charts) == 1
+
+
+def test_history_excel_has_no_chart_for_several_csvs(tmp_path):
+    from openpyxl import load_workbook
+
+    db = make_history(tmp_path)
+    out = tmp_path / "history.xlsx"
+    assert main(["--show-history", str(db), "--history-excel", str(out)]) == 0
+    book = load_workbook(out)
+    assert book.sheetnames == ["履歴"]
+    assert len(list(book["履歴"].iter_rows())) == 5
+
+
+def test_history_excel_cannot_overwrite_the_database(tmp_path, capsys):
+    db = make_history(tmp_path)
+    capsys.readouterr()
+    assert main(["--show-history", str(db), "--history-excel", str(db)]) == 1
+    assert "同じ" in capsys.readouterr().out
+    assert len(load_history(db)) == 4  # データベースは無事
+
+
+def test_history_excel_path_may_exist_while_database_is_missing(tmp_path, capsys):
+    out = write(tmp_path / "x.xlsx", "dummy")
+    assert main(["--show-history", str(tmp_path / "none.db"), "--history-excel", str(out)]) == 1
+    assert "見つかりません" in capsys.readouterr().out

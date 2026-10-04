@@ -8,7 +8,14 @@ from pathlib import Path
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from csv_history import HistoryError, format_history, load_history, open_history, record_inspection
+from csv_history import (
+    HistoryError,
+    export_history_excel,
+    format_history,
+    load_history,
+    open_history,
+    record_inspection,
+)
 from csv_rules import RulesError, evaluate_rules, load_rules
 
 
@@ -75,6 +82,25 @@ def parse_args(argv):
         metavar="DB",
         help="記録された検査結果を、前回との違いつきで表示します(検査はしません)",
     )
+    parser.add_argument(
+        "--history-name",
+        default=None,
+        metavar="CSV名",
+        help="--show-history で、このファイル名のCSVの記録だけを表示します",
+    )
+    parser.add_argument(
+        "--history-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="--show-history で、CSVごとに新しい記録をN件だけ表示します",
+    )
+    parser.add_argument(
+        "--history-excel",
+        default=None,
+        metavar="Excelファイル",
+        help="--show-history で、表示する記録をExcelにも書き出します(1つのCSVなら推移グラフ付き)",
+    )
     return parser.parse_args(argv)
 
 
@@ -86,7 +112,10 @@ def is_same_file(first, second):
     """
     if first.resolve() == second.resolve():
         return True
-    return second.exists() and os.path.samefile(first, second)
+    try:
+        return second.exists() and os.path.samefile(first, second)
+    except FileNotFoundError:
+        return False
 
 
 def read_csv_safely(file_path, **read_options):
@@ -459,6 +488,9 @@ def main(argv=None):
 
     if args.show_history:
         return show_history(args)
+    if args.history_name or args.history_limit is not None or args.history_excel:
+        print("エラー：--history-name・--history-limit・--history-excel は、--show-history と一緒に使います。")
+        return 1
 
     history = None
     if args.history:
@@ -480,17 +512,33 @@ def show_history(args):
     if args.input_file or args.folder or args.history or args.config:
         print("エラー：--show-history は、検査の指定(CSV・--folder・--history・--config)と同時に使えません。")
         return 1
+    if args.history_limit is not None and args.history_limit < 1:
+        print("エラー：--history-limit には、1以上の数を指定してください。")
+        return 1
+    if args.history_excel and is_same_file(Path(args.show_history), Path(args.history_excel)):
+        print("エラー：Excelの保存先が、記録用データベースと同じです。別の名前を指定してください。")
+        return 1
     try:
-        records = load_history(args.show_history)
+        records = load_history(args.show_history, args.history_name, args.history_limit)
     except HistoryError as error:
         print(f"エラー：{error}")
         return 1
     if not records:
-        print("記録がありません。")
+        if args.history_name:
+            print(f"{args.history_name} の記録がありません。")
+        else:
+            print("記録がありません。")
         return 0
     for line in format_history(records):
         print(line)
     print(f"合計 {len(records)} 件の記録")
+    if args.history_excel:
+        try:
+            export_history_excel(records, args.history_excel)
+        except HistoryError as error:
+            print(f"エラー：{error}")
+            return 1
+        print(f"Excel：{args.history_excel} を作成しました。")
     return 0
 
 

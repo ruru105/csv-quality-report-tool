@@ -1,8 +1,18 @@
 import argparse
+import datetime
+import re
 import sys
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font
+from openpyxl.utils.exceptions import IllegalCharacterError
+
+EXCEL_SUFFIXES = (".xlsx", ".xlsm")
+# 保存できるExcelは .xlsx だけ(.xlsm はマクロ付きの形式で、この形では作れない)。
+UNSUPPORTED_OUTPUT_SUFFIXES = (".xls", ".xlsm")
 
 
 DEFAULT_OUTPUT_FILE = "cleaned.csv"
@@ -16,19 +26,23 @@ def parse_args(argv):
     """コマンドで指定された、整形するCSVと出力先を読み取る。"""
     parser = argparse.ArgumentParser(
         description=(
-            "CSVファイルを整形して、別のCSVファイルとして保存します。"
+            "CSVまたはExcel(.xlsx)ファイルを整形して、別のファイルとして保存します。"
+            "保存先の名前が .xlsx で終わるときはExcel、それ以外はCSVで保存します。"
             "元のファイルは書き換えません。"
         )
     )
     parser.add_argument(
         "input_file",
-        help="整形するCSVファイル",
+        help="整形するCSVまたはExcel(.xlsx)ファイル",
     )
     parser.add_argument(
         "-o",
         "--output",
         default=DEFAULT_OUTPUT_FILE,
-        help=f"整形結果を保存するCSVファイル(省略すると {DEFAULT_OUTPUT_FILE})",
+        help=(
+            f"整形結果を保存するファイル(省略すると {DEFAULT_OUTPUT_FILE})。"
+            ".xlsx で終わる名前を指定すると、Excelで保存する"
+        ),
     )
     parser.add_argument(
         "--drop",
@@ -64,7 +78,155 @@ def parse_args(argv):
             "元の列名を書く"
         ),
     )
+    parser.add_argument(
+        "--sheet",
+        help=(
+            "Excelファイルを整形するとき、読み込むシートの名前"
+            "(省略すると、いちばん左のシート)"
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _excel_cell_to_text(value):
+    """Excelのセルの値を、見た目に近い文字にする。空欄は空文字にする。"""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value.is_integer() and abs(value) < 1e15:
+            return str(int(value))
+        return repr(value)
+    if isinstance(value, datetime.datetime):
+        if value.time() == datetime.time(0, 0):
+            return value.date().isoformat()
+        return value.isoformat(sep=" ")
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    return str(value)
+
+
+def read_excel_as_text(file_path, sheet_name=None):
+    """Excel(.xlsx)の1つのシートを、すべて文字のまま読み込む。
+
+    1行目を見出しとして扱う。数式のセルは、Excelが保存した計算結果を読む。
+    日付は「2026-10-01」の形、空欄は空欄にする。末尾の空の行・列は読み飛ばす。
+    見出しが空の列や、同じ名前の見出しがあるときはエラーにする。
+    """
+    try:
+        workbook = load_workbook(file_path, read_only=True, data_only=True)
+    except Exception as error:
+        raise ValueError(
+            "Excelファイルとして開けませんでした。"
+            "パスワード付き・破損・形式違いのファイルは読めません。"
+        ) from error
+
+    try:
+        if sheet_name is None:
+            worksheet = workbook.worksheets[0]
+        elif sheet_name in workbook.sheetnames:
+            worksheet = workbook[sheet_name]
+        else:
+            raise ValueError(
+                f"シート「{sheet_name}」が見つかりません。"
+                "あるシート：" + "、".join(workbook.sheetnames)
+            )
+        rows = [
+            [_excel_cell_to_text(cell) for cell in row]
+            for row in worksheet.iter_rows(values_only=True)
+        ]
+    finally:
+        workbook.close()
+
+    while rows and not any(text != "" for text in rows[-1]):
+        rows.pop()
+    if not rows:
+        raise pd.errors.EmptyDataError("no data")
+
+    width = max(
+        (index + 1 for row in rows for index, text in enumerate(row) if text != ""),
+        default=0,
+    )
+    rows = [(row + [""] * width)[:width] for row in rows]
+
+    header = [name.strip() for name in rows[0]]
+    if any(name == "" for name in header):
+        raise ValueError("見出し(1行目)が空の列があります。見出しを書いてください。")
+    if len(set(header)) != len(header):
+        raise ValueError("同じ名前の見出しがあります。見出しを区別してください。")
+
+    return pd.DataFrame(rows[1:], columns=header, dtype=str)
+
+
+def read_input_as_text(file_path, sheet_name=None):
+    """拡張子から、CSVかExcelかを判断して、文字のまま読み込む。"""
+    suffix = Path(file_path).suffix.lower()
+    if suffix == ".xls":
+        raise ValueError(
+            "古い形式のExcel(.xls)には対応していません。"
+            "Excelで「.xlsx」として保存し直してください。"
+        )
+    if suffix in EXCEL_SUFFIXES:
+        return read_excel_as_text(file_path, sheet_name)
+    if sheet_name is not None:
+        raise ValueError("--sheet はExcelファイルを読むときだけ指定できます。")
+    return read_csv_as_text(file_path)
+
+
+# 数として書き出してよいのは、Excelで数に直しても、元の文字に戻せる値だけ。
+# 「007」「1.0」「090-1234」「12345678901234567890」などは、文字のままにする。
+_PLAIN_NUMBER = re.compile(r"^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$")
+
+
+def _excel_value(text):
+    if _PLAIN_NUMBER.match(text) and len(text.replace("-", "").replace(".", "")) <= 15:
+        number = float(text) if "." in text else int(text)
+        if _excel_cell_to_text(number) == text:
+            return number
+    return text
+
+
+def _visual_width(text):
+    return sum(
+        2 if unicodedata.east_asian_width(char) in ("F", "W") else 1
+        for char in str(text)
+    )
+
+
+def write_excel(data, output_file):
+    """整形したデータをExcel(.xlsx)で保存する。見出しは太字で固定し、絞り込みボタンを付ける。
+
+    普通の数は数として、先頭が0の値や長すぎる数は文字として書き出す(値は変えない)。
+    """
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "整形結果"
+    worksheet.append(list(data.columns))
+    for row in data.itertuples(index=False):
+        worksheet.append([_excel_value(text) for text in row])
+    # 「=」で始まる文字は、openpyxlが数式として保存してしまう。文字のまま保存するよう直す。
+    for row in worksheet.iter_rows():
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                cell.data_type = "s"
+
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+    worksheet.freeze_panes = "A2"
+    if len(data.columns) > 0:
+        worksheet.auto_filter.ref = worksheet.dimensions
+    for column in worksheet.columns:
+        longest = max(
+            (_visual_width(cell.value) for cell in column if cell.value is not None),
+            default=0,
+        )
+        worksheet.column_dimensions[column[0].column_letter].width = min(
+            max(longest + 2, 8), 45
+        )
+    workbook.save(output_file)
 
 
 def read_csv_as_text(file_path):
@@ -267,6 +429,13 @@ def main(argv=None):
         print(f"エラー：{input_file} が見つかりません。")
         return 1
 
+    if output_file.suffix.lower() in UNSUPPORTED_OUTPUT_SUFFIXES:
+        print(
+            f"エラー：保存先の形式「{output_file.suffix}」には対応していません。"
+            "Excelで保存するときは「.xlsx」、そのほかはCSVの名前にしてください。"
+        )
+        return 1
+
     if input_file.resolve() == output_file.resolve():
         print(
             "エラー：保存先が、整形するCSVと同じです。"
@@ -275,7 +444,7 @@ def main(argv=None):
         return 1
 
     try:
-        data = read_csv_as_text(input_file)
+        data = read_input_as_text(input_file, args.sheet)
     except pd.errors.EmptyDataError:
         print(f"エラー：{input_file} にデータがありません。")
         return 1
@@ -329,7 +498,16 @@ def main(argv=None):
             return 1
 
     try:
-        data.to_csv(output_file, index=False, encoding="utf-8-sig")
+        if output_file.suffix.lower() in EXCEL_SUFFIXES:
+            write_excel(data, output_file)
+        else:
+            data.to_csv(output_file, index=False, encoding="utf-8-sig")
+    except IllegalCharacterError:
+        print(
+            "エラー：Excelに書き込めない文字(制御文字)がデータに含まれています。"
+            "元のデータを確認してください。"
+        )
+        return 1
     except OSError:
         print(
             f"エラー：{output_file} に保存できませんでした。"

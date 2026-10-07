@@ -484,3 +484,230 @@ def test_sort_and_rename_do_not_change_the_input_file(tmp_path):
     before = input_file.read_bytes()
     main([str(input_file), "-o", str(tmp_path / "o.csv"), "--sort", "amount", "--rename", "amount=金額"])
     assert input_file.read_bytes() == before
+
+
+# ---- Excel(.xlsx)の読み込みと書き出し ----
+
+import datetime
+
+import pytest
+from openpyxl import Workbook, load_workbook
+
+
+def make_xlsx(path, rows, sheet="売上", extra_sheets=()):
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = sheet
+    for row in rows:
+        worksheet.append(row)
+    for name, extra_rows in extra_sheets:
+        extra = workbook.create_sheet(name)
+        for row in extra_rows:
+            extra.append(row)
+    workbook.save(path)
+    return path
+
+
+def run_xlsx(tmp_path, rows, out_name="output.csv", *options, **kwargs):
+    input_file = make_xlsx(tmp_path / "input.xlsx", rows, **kwargs)
+    output_file = tmp_path / out_name
+    result = main([str(input_file), "-o", str(output_file), *options])
+    return result, output_file
+
+
+def test_excel_input_is_read_as_text_and_saved_as_csv(tmp_path):
+    rows = [
+        ["id", "name", "amount", "day", "flag"],
+        ["007", " Aoki ", 100, datetime.date(2026, 10, 1), True],
+        ["003", "Sato", 50.5, datetime.datetime(2026, 10, 2, 9, 30), False],
+        ["001", "Ito", 30.0, None, None],
+    ]
+    result, out = run_xlsx(tmp_path, rows)
+    assert result == 0
+    assert read_output(out).to_dict("records") == [
+        {"id": "007", "name": "Aoki", "amount": "100", "day": "2026-10-01", "flag": "TRUE"},
+        {"id": "003", "name": "Sato", "amount": "50.5", "day": "2026-10-02 09:30:00", "flag": "FALSE"},
+        {"id": "001", "name": "Ito", "amount": "30", "day": "", "flag": ""},
+    ]
+
+
+def test_excel_input_uses_first_sheet_by_default_and_sheet_option_selects_another(tmp_path):
+    rows = [["a"], ["first"]]
+    extra = [("2枚目", [["a"], ["second"]])]
+    _, first = run_xlsx(tmp_path, rows, "o1.csv", extra_sheets=extra)
+    assert list(read_output(first)["a"]) == ["first"]
+    result, second = run_xlsx(tmp_path, rows, "o2.csv", "--sheet", "2枚目", extra_sheets=extra)
+    assert result == 0
+    assert list(read_output(second)["a"]) == ["second"]
+
+
+def test_excel_unknown_sheet_is_an_error_listing_sheets(tmp_path, capsys):
+    result, out = run_xlsx(tmp_path, [["a"], ["1"]], "o.csv", "--sheet", "nothing")
+    assert result == 1
+    assert not out.exists()
+    message = capsys.readouterr().out
+    assert "シート「nothing」が見つかりません" in message
+    assert "売上" in message
+
+
+def test_sheet_option_with_csv_input_is_an_error(tmp_path, capsys):
+    result, out = run_clean(tmp_path, "a\n1\n", "--sheet", "売上")
+    assert result == 1
+    assert not out.exists()
+    assert "--sheet はExcelファイルを読むときだけ" in capsys.readouterr().out
+
+
+def test_excel_blank_or_duplicate_headers_are_errors(tmp_path, capsys):
+    result, out = run_xlsx(tmp_path, [["a", None, "c"], [1, 2, 3]])
+    assert result == 1 and not out.exists()
+    assert "見出し(1行目)が空の列があります" in capsys.readouterr().out
+    result, out = run_xlsx(tmp_path, [["a", "a"], [1, 2]], "o2.csv")
+    assert result == 1 and not out.exists()
+    assert "同じ名前の見出しがあります" in capsys.readouterr().out
+
+
+def test_excel_with_no_data_is_an_error(tmp_path, capsys):
+    result, out = run_xlsx(tmp_path, [])
+    assert result == 1 and not out.exists()
+    assert "データがありません" in capsys.readouterr().out
+
+
+def test_excel_header_only_gives_header_only_output(tmp_path):
+    result, out = run_xlsx(tmp_path, [["a", "b"]])
+    assert result == 0
+    assert list(read_output(out).columns) == ["a", "b"]
+    assert len(read_output(out)) == 0
+
+
+def test_excel_trailing_empty_rows_and_columns_are_ignored(tmp_path):
+    rows = [["a", "b", None], [1, 2, None], [None, None, None], [None, None, None]]
+    result, out = run_xlsx(tmp_path, rows)
+    assert result == 0
+    assert read_output(out).to_dict("records") == [{"a": "1", "b": "2"}]
+
+
+def test_broken_file_named_xlsx_is_an_error_not_a_crash(tmp_path, capsys):
+    broken = tmp_path / "broken.xlsx"
+    broken.write_text("これはExcelではありません", encoding="utf-8")
+    out = tmp_path / "o.csv"
+    assert main([str(broken), "-o", str(out)]) == 1
+    assert not out.exists()
+    assert "Excelファイルとして開けませんでした" in capsys.readouterr().out
+
+
+def test_old_xls_format_is_an_error_with_a_hint(tmp_path, capsys):
+    old = tmp_path / "old.xls"
+    old.write_bytes(b"dummy")
+    out = tmp_path / "o.csv"
+    assert main([str(old), "-o", str(out)]) == 1
+    assert not out.exists()
+    assert ".xlsx」として保存し直してください" in capsys.readouterr().out
+
+
+def test_formula_without_saved_result_reads_as_blank(tmp_path):
+    # 数式のセルは、Excelが保存した計算結果を読む。計算結果がない(プログラムで作っただけの)ファイルは空欄。
+    rows = [["a", "b"], [1, "=A2*2"]]
+    result, out = run_xlsx(tmp_path, rows)
+    assert result == 0
+    assert read_output(out).to_dict("records") == [{"a": "1", "b": ""}]
+
+
+def test_excel_input_file_is_not_changed(tmp_path):
+    input_file = make_xlsx(tmp_path / "input.xlsx", [["a"], [1]])
+    before = input_file.read_bytes()
+    main([str(input_file), "-o", str(tmp_path / "o.xlsx"), "--rename", "a=b"])
+    assert input_file.read_bytes() == before
+
+
+def test_excel_input_and_output_same_path_is_an_error(tmp_path, capsys):
+    input_file = make_xlsx(tmp_path / "input.xlsx", [["a"], [1]])
+    assert main([str(input_file), "-o", str(input_file)]) == 1
+    assert "保存先が、整形するCSVと同じです" in capsys.readouterr().out
+
+
+def test_csv_to_excel_creates_a_real_xlsx_with_header_style(tmp_path):
+    result, out = run_clean(tmp_path, "id,name,amount\n007,Aoki,100\n003,Sato,50.5\n")
+    assert result == 0
+    out = tmp_path / "result.xlsx"
+    input_file = tmp_path / "input.csv"
+    assert main([str(input_file), "-o", str(out)]) == 0
+    sheet = load_workbook(out).active
+    assert out.read_bytes()[:2] == b"PK"            # 本物のxlsx(zip)。CSVの文字を別名で保存していない
+    assert sheet.title == "整形結果"
+    assert [c.value for c in sheet[1]] == ["id", "name", "amount"]
+    assert sheet["A1"].font.bold is True
+    assert sheet.freeze_panes == "A2"
+    assert sheet.auto_filter.ref == "A1:C3"
+    # 普通の数は数として、先頭が0の値は文字のまま。
+    assert sheet["A2"].value == "007" and sheet["A2"].data_type == "s"
+    assert sheet["C2"].value == 100 and sheet["C2"].data_type == "n"
+    assert sheet["C3"].value == 50.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["007", "1.0", "1.50", "+5", "1e3", "090-1234-5678", "12345678901234567", "-0", "0.", ".5", "1,000"],
+)
+def test_values_that_would_change_stay_text_in_excel_output(tmp_path, text):
+    input_file = write_csv(tmp_path / "input.csv", f'v\n"{text}"\n')
+    out = tmp_path / "out.xlsx"
+    assert main([str(input_file), "-o", str(out)]) == 0
+    cell = load_workbook(out).active["A2"]
+    assert cell.value == text and cell.data_type == "s"
+
+
+@pytest.mark.parametrize("text,expected", [("0", 0), ("12", 12), ("-3", -3), ("0.5", 0.5), ("100.25", 100.25)])
+def test_plain_numbers_become_numbers_in_excel_output(tmp_path, text, expected):
+    input_file = write_csv(tmp_path / "input.csv", f"v\n{text}\n")
+    out = tmp_path / "out.xlsx"
+    assert main([str(input_file), "-o", str(out)]) == 0
+    cell = load_workbook(out).active["A2"]
+    assert cell.value == expected and cell.data_type == "n"
+
+
+def test_text_starting_with_equals_is_not_saved_as_a_formula(tmp_path):
+    input_file = write_csv(tmp_path / "input.csv", 'v\n"=1+1"\n')
+    out = tmp_path / "out.xlsx"
+    assert main([str(input_file), "-o", str(out)]) == 0
+    cell = load_workbook(out).active["A2"]
+    assert cell.value == "=1+1" and cell.data_type == "s"
+
+
+def test_excel_round_trip_keeps_every_value(tmp_path):
+    values = ["007", "1.0", "", "100", "50.5", "-3", "=A1", "あ い", "090-1234"]
+    csv_text = "v\n" + "\n".join(f'"{v}"' if v else '""' for v in values) + "\n"
+    first = tmp_path / "first.xlsx"
+    assert main([str(write_csv(tmp_path / "in.csv", csv_text, "utf-8")), "-o", str(first)]) == 0
+    back = tmp_path / "back.csv"
+    assert main([str(first), "-o", str(back)]) == 0
+    assert list(read_output(back)["v"]) == values
+
+
+def test_excel_to_excel_with_all_options(tmp_path):
+    rows = [["id", "dept", "amount"], ["001", "Care", 50], ["002", "Office", 10], ["003", "Care", 100]]
+    result, out = run_xlsx(
+        tmp_path, rows, "out.xlsx",
+        "--where", "dept=Care", "--sort", "amount", "--desc", "--drop", "dept", "--rename", "amount=売上額",
+    )
+    assert result == 0
+    sheet = load_workbook(out).active
+    assert [[c.value for c in row] for row in sheet.iter_rows()] == [
+        ["id", "売上額"], ["003", 100], ["001", 50],
+    ]
+
+
+@pytest.mark.parametrize("name", ["out.xlsm", "out.xls"])
+def test_unsupported_excel_output_formats_are_errors_and_no_file(tmp_path, name, capsys):
+    input_file = write_csv(tmp_path / "input.csv", "a\n1\n")
+    out = tmp_path / name
+    assert main([str(input_file), "-o", str(out)]) == 1
+    assert not out.exists()
+    assert "には対応していません" in capsys.readouterr().out
+
+
+def test_control_characters_cannot_be_written_to_excel_and_give_an_error(tmp_path, capsys):
+    input_file = write_csv(tmp_path / "input.csv", "a\nx\x01y\n", "utf-8")
+    out = tmp_path / "out.xlsx"
+    assert main([str(input_file), "-o", str(out)]) == 1
+    assert not out.exists()
+    assert "制御文字" in capsys.readouterr().out

@@ -44,6 +44,26 @@ def parse_args(argv):
             "(例: --where 部署=Care)"
         ),
     )
+    parser.add_argument(
+        "--sort",
+        help=(
+            "並べ替えに使う列名。数字だけの列は数の大きさで並べる"
+            "(例: --sort 金額)。空欄の行は、いつも最後に置く"
+        ),
+    )
+    parser.add_argument(
+        "--desc",
+        action="store_true",
+        help="--sort を、大きい順(降順)にする",
+    )
+    parser.add_argument(
+        "--rename",
+        help=(
+            "列名を変える。「元の名前=新しい名前」の形で、複数はカンマで区切る"
+            "(例: --rename 名前=氏名,部署=所属)。--where・--drop・--sort には"
+            "元の列名を書く"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -159,6 +179,85 @@ def drop_columns(data, column_names):
     return dropped_data
 
 
+def sort_rows(data, column_name, descending=False):
+    """指定した列の値で並べ替える。
+
+    その列の空欄でない値がすべて数として読めるときは、数の大きさで並べる
+    (「100」が「30」より先に来ないようにするため)。そうでないときは文字の順で並べる。
+    空欄の行は、昇順でも降順でも最後に置く。同じ値の行は、元の順番を保つ。
+    列名がCSVにないときはエラーにする。並べ替えるだけで、値そのものは変えない。
+    """
+    if column_name not in data.columns:
+        raise ValueError(f"並べ替えに使う列名「{column_name}」がCSVに見つかりません。")
+
+    column = data[column_name]
+    filled = column != ""
+    numbers = pd.to_numeric(column.where(filled), errors="coerce")
+    use_numbers = bool(filled.any()) and not numbers[filled].isna().any()
+
+    key = numbers if use_numbers else column.where(filled)
+    # 行番号(0から数えた位置)で並べ替える。絞り込みのあとは、元の行番号が飛び飛びに
+    # なっているため、行のラベルではなく位置で指定する。
+    ranking = pd.DataFrame({"key": key.to_numpy(), "position": range(len(data))})
+    ordered = ranking.sort_values(
+        by=["key", "position"],
+        ascending=[not descending, True],
+        na_position="last",
+        kind="stable",
+    )
+    return data.iloc[ordered["position"].tolist()]
+
+
+def parse_rename(text):
+    """「元の名前=新しい名前,…」を、(元の名前, 新しい名前)の一覧にする。"""
+    pairs = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(
+                f'--rename の指定「{part}」が正しくありません。'
+                "「元の名前=新しい名前」の形で指定してください。"
+            )
+        old, _, new = part.partition("=")
+        old, new = old.strip(), new.strip()
+        if not old or not new:
+            raise ValueError(
+                f'--rename の指定「{part}」が正しくありません。'
+                "元の名前と新しい名前の両方を書いてください。"
+            )
+        pairs.append((old, new))
+    if not pairs:
+        raise ValueError("--rename に、変更する列名が指定されていません。")
+    return pairs
+
+
+def rename_columns(data, pairs):
+    """列名を変える。値と列の並びは変えない。
+
+    CSVにない列名、同じ列を2回変える指定、変えたあとの名前が重なる指定はエラーにする。
+    """
+    olds = [old for old, _ in pairs]
+    missing = [old for old in olds if old not in data.columns]
+    if missing:
+        raise ValueError(
+            "名前を変える列がCSVに見つかりません：" + "、".join(missing)
+        )
+    if len(set(olds)) != len(olds):
+        raise ValueError("同じ列の名前を2回変える指定はできません。")
+
+    mapping = dict(pairs)
+    new_names = [mapping.get(name, name) for name in data.columns]
+    if len(set(new_names)) != len(new_names):
+        raise ValueError(
+            "名前を変えたあとの列名が、ほかの列と重なります。別の名前にしてください。"
+        )
+    renamed = data.copy()
+    renamed.columns = new_names
+    return renamed
+
+
 def main(argv=None):
     args = parse_args(argv)
     input_file = Path(args.input_file)
@@ -208,6 +307,27 @@ def main(argv=None):
             print(f"エラー：{error}")
             return 1
 
+    sort_note = ""
+    if args.sort:
+        try:
+            data = sort_rows(data, args.sort.strip(), args.desc)
+        except ValueError as error:
+            print(f"エラー：{error}")
+            return 1
+        sort_note = f"{args.sort.strip()}（{'降順' if args.desc else '昇順'}）"
+    elif args.desc:
+        print("エラー：--desc は --sort と一緒に指定してください。")
+        return 1
+
+    renamed_pairs = []
+    if args.rename:
+        try:
+            renamed_pairs = parse_rename(args.rename)
+            data = rename_columns(data, renamed_pairs)
+        except ValueError as error:
+            print(f"エラー：{error}")
+            return 1
+
     try:
         data.to_csv(output_file, index=False, encoding="utf-8-sig")
     except OSError:
@@ -225,6 +345,10 @@ def main(argv=None):
     )
     if dropped_columns:
         stats += " / 削除した列=" + "、".join(dropped_columns)
+    if sort_note:
+        stats += " / 並べ替え=" + sort_note
+    if renamed_pairs:
+        stats += " / 列名の変更=" + "、".join(f"{o}→{n}" for o, n in renamed_pairs)
     print(stats)
     return 0
 

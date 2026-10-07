@@ -335,3 +335,152 @@ def test_genuinely_single_column_input_stays_single_column(tmp_path):
         {"name": "Aoki"},
         {"name": "Sato"},
     ]
+
+
+# ---- 並べ替え(--sort・--desc)と列名の変更(--rename) ----
+
+def run_clean(tmp_path, text, *options):
+    input_file = write_csv(tmp_path / "input.csv", text)
+    output_file = tmp_path / "output.csv"
+    result = main([str(input_file), "-o", str(output_file), *options])
+    return result, output_file
+
+
+def test_sort_numeric_column_by_size_not_by_text(tmp_path):
+    # 文字の順だと「100」が「30」より先に来てしまうので、数の大きさで並べる。
+    result, out = run_clean(tmp_path, "id,amount\n1,100\n2,30\n3,50\n", "--sort", "amount")
+    assert result == 0
+    assert list(read_output(out)["amount"]) == ["30", "50", "100"]
+
+
+def test_sort_descending(tmp_path):
+    result, out = run_clean(tmp_path, "id,amount\n1,100\n2,30\n3,50\n", "--sort", "amount", "--desc")
+    assert result == 0
+    assert list(read_output(out)["amount"]) == ["100", "50", "30"]
+
+
+def test_sort_keeps_leading_zeros_in_values(tmp_path):
+    # 並べ替えでも、「007」は「007」のまま。
+    result, out = run_clean(tmp_path, "id,n\n007,2\n003,1\n", "--sort", "n")
+    assert result == 0
+    assert list(read_output(out)["id"]) == ["003", "007"]
+
+
+def test_sort_text_column_uses_text_order(tmp_path):
+    result, out = run_clean(tmp_path, "id,name\n1,Sato\n2,Aoki\n3,Tanaka\n", "--sort", "name")
+    assert result == 0
+    assert list(read_output(out)["name"]) == ["Aoki", "Sato", "Tanaka"]
+
+
+def test_sort_puts_blank_values_last_in_both_directions(tmp_path):
+    text = "id,amount\n1,\n2,30\n3,100\n"
+    _, up = run_clean(tmp_path, text, "--sort", "amount")
+    assert list(read_output(up)["id"]) == ["2", "3", "1"]
+    _, down = run_clean(tmp_path, text, "--sort", "amount", "--desc")
+    assert list(read_output(down)["id"]) == ["3", "2", "1"]
+
+
+def test_sort_keeps_original_order_for_equal_values(tmp_path):
+    text = "id,group\nA,2\nB,1\nC,2\nD,1\n"
+    _, up = run_clean(tmp_path, text, "--sort", "group")
+    assert list(read_output(up)["id"]) == ["B", "D", "A", "C"]
+    _, down = run_clean(tmp_path, text, "--sort", "group", "--desc")
+    assert list(read_output(down)["id"]) == ["A", "C", "B", "D"]
+
+
+def test_sort_mixed_numbers_and_text_falls_back_to_text_order(tmp_path):
+    result, out = run_clean(tmp_path, "id,v\n1,10\n2,9\n3,abc\n", "--sort", "v")
+    assert result == 0
+    assert list(read_output(out)["v"]) == ["10", "9", "abc"]
+
+
+def test_sort_unknown_column_is_an_error_and_no_file(tmp_path, capsys):
+    result, out = run_clean(tmp_path, "id,amount\n1,100\n", "--sort", "price")
+    assert result == 1
+    assert not out.exists()
+    assert "並べ替えに使う列名「price」がCSVに見つかりません" in capsys.readouterr().out
+
+
+def test_desc_without_sort_is_an_error(tmp_path, capsys):
+    result, out = run_clean(tmp_path, "id,amount\n1,100\n", "--desc")
+    assert result == 1
+    assert not out.exists()
+    assert "--desc は --sort と一緒に" in capsys.readouterr().out
+
+
+def test_rename_changes_only_the_header(tmp_path, capsys):
+    result, out = run_clean(tmp_path, "id,name,dept\n007,Aoki,Care\n", "--rename", "name=氏名,dept=所属")
+    assert result == 0
+    data = read_output(out)
+    assert list(data.columns) == ["id", "氏名", "所属"]
+    assert data.to_dict("records") == [{"id": "007", "氏名": "Aoki", "所属": "Care"}]
+    assert "列名の変更=name→氏名、dept→所属" in capsys.readouterr().out
+
+
+def test_rename_unknown_column_is_an_error_and_no_file(tmp_path, capsys):
+    result, out = run_clean(tmp_path, "id,name\n1,Aoki\n", "--rename", "title=氏名")
+    assert result == 1
+    assert not out.exists()
+    assert "名前を変える列がCSVに見つかりません：title" in capsys.readouterr().out
+
+
+def test_rename_to_an_existing_column_name_is_an_error(tmp_path, capsys):
+    result, out = run_clean(tmp_path, "id,name\n1,Aoki\n", "--rename", "name=id")
+    assert result == 1
+    assert not out.exists()
+    assert "ほかの列と重なります" in capsys.readouterr().out
+
+
+def test_rename_two_columns_to_the_same_name_is_an_error(tmp_path):
+    result, out = run_clean(tmp_path, "a,b\n1,2\n", "--rename", "a=x,b=x")
+    assert result == 1
+    assert not out.exists()
+
+
+def test_rename_same_column_twice_is_an_error(tmp_path):
+    result, out = run_clean(tmp_path, "a,b\n1,2\n", "--rename", "a=x,a=y")
+    assert result == 1
+    assert not out.exists()
+
+
+def test_rename_swapping_two_names_is_allowed(tmp_path):
+    # 入れ替えは、重なりにならない。
+    result, out = run_clean(tmp_path, "a,b\n1,2\n", "--rename", "a=b,b=a")
+    assert result == 0
+    assert read_output(out).to_dict("records") == [{"b": "1", "a": "2"}]
+
+
+def test_rename_bad_format_is_an_error(tmp_path, capsys):
+    for bad in ["name", "name=", "=氏名", ","]:
+        result, out = run_clean(tmp_path, "id,name\n1,Aoki\n", "--rename", bad)
+        assert result == 1
+        assert not out.exists()
+    assert "--rename の指定" in capsys.readouterr().out
+
+
+def test_where_drop_sort_use_original_names_and_rename_is_applied_last(tmp_path):
+    text = "id,dept,amount\n1,Care,50\n2,Office,10\n3,Care,100\n"
+    result, out = run_clean(
+        tmp_path, text,
+        "--where", "dept=Care", "--sort", "amount", "--desc",
+        "--drop", "dept", "--rename", "amount=金額",
+    )
+    assert result == 0
+    assert read_output(out).to_dict("records") == [
+        {"id": "3", "金額": "100"},
+        {"id": "1", "金額": "50"},
+    ]
+
+
+def test_rename_a_dropped_column_is_an_error(tmp_path):
+    result, out = run_clean(tmp_path, "id,dept\n1,Care\n", "--drop", "dept", "--rename", "dept=所属")
+    assert result == 1
+    assert not out.exists()
+
+
+def test_sort_and_rename_do_not_change_the_input_file(tmp_path):
+    text = "id,amount\n1,100\n2,30\n"
+    input_file = write_csv(tmp_path / "input.csv", text)
+    before = input_file.read_bytes()
+    main([str(input_file), "-o", str(tmp_path / "o.csv"), "--sort", "amount", "--rename", "amount=金額"])
+    assert input_file.read_bytes() == before

@@ -622,7 +622,7 @@ def test_excel_input_file_is_not_changed(tmp_path):
 def test_excel_input_and_output_same_path_is_an_error(tmp_path, capsys):
     input_file = make_xlsx(tmp_path / "input.xlsx", [["a"], [1]])
     assert main([str(input_file), "-o", str(input_file)]) == 1
-    assert "保存先が、整形するCSVと同じです" in capsys.readouterr().out
+    assert "保存先が、入力ファイル(CSVまたはExcel)と同じです" in capsys.readouterr().out
 
 
 def test_csv_to_excel_creates_a_real_xlsx_with_header_style(tmp_path):
@@ -711,3 +711,149 @@ def test_control_characters_cannot_be_written_to_excel_and_give_an_error(tmp_pat
     assert main([str(input_file), "-o", str(out)]) == 1
     assert not out.exists()
     assert "制御文字" in capsys.readouterr().out
+
+
+# ---- 条件で取り除く(--exclude)・外れた行数の表示・数式の注意 ----
+
+ORDERS = "id,状態,金額\n1,確定,100\n2,キャンセル,200\n3,確定,300\n4,キャンセル待ち,400\n"
+
+
+def test_exclude_removes_matching_rows_and_keeps_the_rest_in_order(tmp_path, capsys):
+    result, out = run_clean(tmp_path, ORDERS, "--exclude", "状態=キャンセル")
+    assert result == 0
+    assert [r["id"] for r in read_output(out).to_dict("records")] == ["1", "3", "4"]
+    assert "取り除いた行(--exclude)=1" in capsys.readouterr().out
+
+
+def test_exclude_is_exact_match_not_partial(tmp_path):
+    # 「キャンセル」を指定しても、「キャンセル待ち」は取り除かない。
+    result, out = run_clean(tmp_path, ORDERS, "--exclude", "状態=キャンセル")
+    assert "キャンセル待ち" in read_output(out)["状態"].tolist()
+
+
+def test_exclude_with_no_match_keeps_every_row_and_reports_zero(tmp_path, capsys):
+    result, out = run_clean(tmp_path, ORDERS, "--exclude", "状態=返品")
+    assert result == 0
+    assert len(read_output(out)) == 4
+    assert "取り除いた行(--exclude)=0" in capsys.readouterr().out
+
+
+def test_exclude_can_remove_every_row_and_leaves_a_header_only_file(tmp_path):
+    result, out = run_clean(tmp_path, "id,状態\n1,キャンセル\n2,キャンセル\n", "--exclude", "状態=キャンセル")
+    assert result == 0
+    data = read_output(out)
+    assert len(data) == 0
+    assert list(data.columns) == ["id", "状態"]
+
+
+def test_exclude_with_empty_value_removes_blank_cells_only(tmp_path):
+    result, out = run_clean(tmp_path, "id,状態\n1,確定\n2,\n3,確定\n", "--exclude", "状態=")
+    assert result == 0
+    assert [r["id"] for r in read_output(out).to_dict("records")] == ["1", "3"]
+
+
+def test_exclude_unknown_column_is_an_error_and_no_file(tmp_path, capsys):
+    result, out = run_clean(tmp_path, ORDERS, "--exclude", "ステータス=キャンセル")
+    assert result == 1
+    assert not out.exists()
+    assert "列名「ステータス」がCSVに見つかりません" in capsys.readouterr().out
+
+
+def test_exclude_invalid_format_names_the_exclude_option(tmp_path, capsys):
+    result, out = run_clean(tmp_path, ORDERS, "--exclude", "状態キャンセル")
+    assert result == 1
+    assert not out.exists()
+    message = capsys.readouterr().out
+    assert "--exclude の指定「状態キャンセル」が正しくありません" in message
+    assert "--where" not in message
+
+
+def test_where_and_exclude_together_and_both_counts_are_shown(tmp_path, capsys):
+    text = "id,部署,状態\n1,A,確定\n2,A,キャンセル\n3,B,確定\n4,A,確定\n"
+    result, out = run_clean(tmp_path, text, "--where", "部署=A", "--exclude", "状態=キャンセル")
+    assert result == 0
+    assert [r["id"] for r in read_output(out).to_dict("records")] == ["1", "4"]
+    message = capsys.readouterr().out
+    assert "絞り込み(--where)で外れた行=1" in message
+    assert "取り除いた行(--exclude)=1" in message
+
+
+def test_where_alone_reports_how_many_rows_it_removed(tmp_path, capsys):
+    result, out = run_clean(tmp_path, ORDERS, "--where", "状態=確定")
+    assert result == 0
+    message = capsys.readouterr().out
+    assert "絞り込み(--where)で外れた行=2" in message
+    assert "--exclude" not in message
+
+
+def test_counts_are_not_shown_when_options_are_not_used(tmp_path, capsys):
+    run_clean(tmp_path, ORDERS)
+    message = capsys.readouterr().out
+    assert "--where" not in message and "--exclude" not in message
+
+
+def test_exclude_uses_original_column_names_even_with_rename(tmp_path):
+    result, out = run_clean(
+        tmp_path, ORDERS, "--exclude", "状態=キャンセル", "--rename", "状態=Status"
+    )
+    assert result == 0
+    data = read_output(out)
+    assert list(data.columns) == ["id", "Status", "金額"]
+    assert len(data) == 3
+
+
+def test_exclude_runs_after_duplicate_removal_and_counts_stay_consistent(tmp_path, capsys):
+    text = "id,状態\n1,確定\n1,確定\n2,キャンセル\n"
+    result, out = run_clean(tmp_path, text, "--exclude", "状態=キャンセル")
+    assert result == 0
+    message = capsys.readouterr().out
+    assert "データ件数=3→1" in message
+    assert "取り除いた重複行=1" in message
+    assert "取り除いた行(--exclude)=1" in message
+
+
+def test_exclude_also_works_for_excel_input_and_output(tmp_path):
+    rows = [["id", "状態"], [1, "確定"], [2, "キャンセル"], [3, "確定"]]
+    input_file = make_xlsx(tmp_path / "input.xlsx", rows)
+    out = tmp_path / "out.xlsx"
+    assert main([str(input_file), "-o", str(out), "--exclude", "状態=キャンセル"]) == 0
+    sheet = load_workbook(out).active
+    assert [[c.value for c in row] for row in sheet.iter_rows()][1:] == [[1, "確定"], [3, "確定"]]
+
+
+def test_same_path_message_names_both_csv_and_excel(tmp_path, capsys):
+    input_file = write_csv(tmp_path / "input.csv", "a\n1\n")
+    assert main([str(input_file), "-o", str(input_file)]) == 1
+    assert "入力ファイル(CSVまたはExcel)と同じです" in capsys.readouterr().out
+
+
+def test_formulas_without_saved_result_are_counted_in_a_notice(tmp_path, capsys):
+    rows = [["a", "b"], [1, "=A2*2"], [2, "=A3*2"]]
+    result, out = run_xlsx(tmp_path, rows)
+    assert result == 0
+    assert "計算結果が保存されていないセルが2個" in capsys.readouterr().out
+
+
+def test_no_formula_notice_for_plain_excel_input(tmp_path, capsys):
+    result, out = run_xlsx(tmp_path, [["a", "b"], [1, 2]])
+    assert result == 0
+    assert "計算結果" not in capsys.readouterr().out
+
+
+def test_no_formula_notice_for_csv_input(tmp_path, capsys):
+    run_clean(tmp_path, "a,b\n1,=A2*2\n")
+    assert "計算結果" not in capsys.readouterr().out
+
+
+def test_text_that_only_starts_with_equals_is_not_counted_as_a_formula(tmp_path, capsys):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["a"])
+    cell = sheet.cell(row=2, column=1, value="=memo")
+    cell.data_type = "s"
+    path = tmp_path / "input.xlsx"
+    workbook.save(path)
+    out = tmp_path / "o.csv"
+    assert main([str(path), "-o", str(out)]) == 0
+    assert "計算結果" not in capsys.readouterr().out
+    assert read_output(out).to_dict("records") == [{"a": "=memo"}]

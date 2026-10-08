@@ -59,6 +59,13 @@ def parse_args(argv):
         ),
     )
     parser.add_argument(
+        "--exclude",
+        help=(
+            "取り除く行の条件を「列名=値」で指定する。値が完全に一致する行を取り除く"
+            "(例: --exclude 状態=キャンセル)。--where と一緒に使える"
+        ),
+    )
+    parser.add_argument(
         "--sort",
         help=(
             "並べ替えに使う列名。数字だけの列は数の大きさで並べる"
@@ -74,7 +81,7 @@ def parse_args(argv):
         "--rename",
         help=(
             "列名を変える。「元の名前=新しい名前」の形で、複数はカンマで区切る"
-            "(例: --rename 名前=氏名,部署=所属)。--where・--drop・--sort には"
+            "(例: --rename 名前=氏名,部署=所属)。--where・--exclude・--drop・--sort には"
             "元の列名を書く"
         ),
     )
@@ -109,6 +116,31 @@ def _excel_cell_to_text(value):
     return str(value)
 
 
+def _count_formulas_without_result(file_path, sheet_title):
+    """計算結果が保存されていない数式のセルの数を数える(読み込みの注意用)。
+
+    プログラムで作っただけのExcelなど、Excelで一度も開いて保存していない
+    ファイルでは、数式があっても計算結果がない。その数式のセルは空欄として読まれる。
+    """
+    try:
+        with_results = load_workbook(file_path, read_only=True, data_only=True)
+        with_formulas = load_workbook(file_path, read_only=True, data_only=False)
+    except Exception:
+        return 0
+    count = 0
+    try:
+        result_rows = with_results[sheet_title].iter_rows(values_only=True)
+        formula_rows = with_formulas[sheet_title].iter_rows(values_only=True)
+        for result_row, formula_row in zip(result_rows, formula_rows):
+            for result, formula in zip(result_row, formula_row):
+                if result is None and isinstance(formula, str) and formula.startswith("="):
+                    count += 1
+    finally:
+        with_results.close()
+        with_formulas.close()
+    return count
+
+
 def read_excel_as_text(file_path, sheet_name=None):
     """Excel(.xlsx)の1つのシートを、すべて文字のまま読み込む。
 
@@ -141,6 +173,8 @@ def read_excel_as_text(file_path, sheet_name=None):
     finally:
         workbook.close()
 
+    blank_formula_count = _count_formulas_without_result(file_path, worksheet.title)
+
     while rows and not any(text != "" for text in rows[-1]):
         rows.pop()
     if not rows:
@@ -158,7 +192,9 @@ def read_excel_as_text(file_path, sheet_name=None):
     if len(set(header)) != len(header):
         raise ValueError("同じ名前の見出しがあります。見出しを区別してください。")
 
-    return pd.DataFrame(rows[1:], columns=header, dtype=str)
+    data = pd.DataFrame(rows[1:], columns=header, dtype=str)
+    data.attrs["blank_formula_cells"] = blank_formula_count
+    return data
 
 
 def read_input_as_text(file_path, sheet_name=None):
@@ -300,15 +336,20 @@ def remove_duplicate_rows(data):
     return unique_data, len(data) - len(unique_data)
 
 
-def parse_where(condition):
-    """「列名=値」の形式を、列名と値に分ける。"""
+def parse_condition(condition, option="--where"):
+    """「列名=値」の形式を、列名と値に分ける。optionはエラー文に出す指定名。"""
     if "=" not in condition:
         raise ValueError(
-            f'--where の指定「{condition}」が正しくありません。'
+            f'{option} の指定「{condition}」が正しくありません。'
             "「列名=値」の形式で指定してください。"
         )
     column_name, _, value = condition.partition("=")
     return column_name, value
+
+
+def parse_where(condition):
+    """--where の「列名=値」を、列名と値に分ける。"""
+    return parse_condition(condition, "--where")
 
 
 def filter_rows(data, column_name, value):
@@ -319,6 +360,17 @@ def filter_rows(data, column_name, value):
     if column_name not in data.columns:
         raise ValueError(f"列名「{column_name}」がCSVに見つかりません。")
     return data[data[column_name] == value]
+
+
+def exclude_rows(data, column_name, value):
+    """指定した列が、指定した値と完全に一致する行を取り除く。
+
+    列名がCSVにないときはエラーにする。空欄の行は、値が空のときだけ取り除く。
+    整形後のデータを返す。
+    """
+    if column_name not in data.columns:
+        raise ValueError(f"列名「{column_name}」がCSVに見つかりません。")
+    return data[data[column_name] != value]
 
 
 def drop_columns(data, column_names):
@@ -438,7 +490,7 @@ def main(argv=None):
 
     if input_file.resolve() == output_file.resolve():
         print(
-            "エラー：保存先が、整形するCSVと同じです。"
+            "エラー：保存先が、入力ファイル(CSVまたはExcel)と同じです。"
             "元のファイルを書き換えないように、別の名前を指定してください。"
         )
         return 1
@@ -453,17 +505,32 @@ def main(argv=None):
         return 1
 
     row_count = len(data)
+    blank_formula_cells = data.attrs.get("blank_formula_cells", 0)
 
     data, space_count = trim_spaces(data)
     data, duplicate_count = remove_duplicate_rows(data)
 
+    where_removed = None
     if args.where:
+        before_where = len(data)
         try:
             column_name, value = parse_where(args.where)
             data = filter_rows(data, column_name, value)
         except ValueError as error:
             print(f"エラー：{error}")
             return 1
+        where_removed = before_where - len(data)
+
+    exclude_removed = None
+    if args.exclude:
+        before_exclude = len(data)
+        try:
+            column_name, value = parse_condition(args.exclude, "--exclude")
+            data = exclude_rows(data, column_name, value)
+        except ValueError as error:
+            print(f"エラー：{error}")
+            return 1
+        exclude_removed = before_exclude - len(data)
 
     dropped_columns = []
     if args.drop:
@@ -516,11 +583,20 @@ def main(argv=None):
         return 1
 
     print(f"完了：{output_file} を作成しました。")
+    if blank_formula_cells:
+        print(
+            f"注意：数式の計算結果が保存されていないセルが{blank_formula_cells}個あり、"
+            "空欄として扱いました。Excelで一度開いて保存し直すと、計算結果が入ります。"
+        )
     stats = (
         f"データ件数={row_count}→{len(data)} / "
         f"空白を消した箇所={space_count} / "
         f"取り除いた重複行={duplicate_count}"
     )
+    if where_removed is not None:
+        stats += f" / 絞り込み(--where)で外れた行={where_removed}"
+    if exclude_removed is not None:
+        stats += f" / 取り除いた行(--exclude)={exclude_removed}"
     if dropped_columns:
         stats += " / 削除した列=" + "、".join(dropped_columns)
     if sort_note:
